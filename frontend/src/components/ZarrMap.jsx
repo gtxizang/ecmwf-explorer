@@ -727,10 +727,11 @@ function findNearestIndex(coords, target) {
 
 export function ZarrMap({ onPolarView, onGlobeView }) {
   // Start centred on Europe (ECMWF is in Reading)
+  // Initial zoom lowered to 1 for faster initial load (loads level 2 instead of 3+)
   const [viewState, setViewState] = useState({
     longitude: 5,
     latitude: 50,
-    zoom: 4,
+    zoom: 1,
     minZoom: 0,
     maxZoom: 6,
     pitch: 0,
