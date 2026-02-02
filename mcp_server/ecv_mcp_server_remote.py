@@ -19,6 +19,7 @@ import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -161,8 +162,15 @@ BRANDING = {
 }
 
 
-# Create the MCP server
-mcp = FastMCP("ecv-explorer")
+# Create the MCP server with allowed hosts for proxy deployment
+mcp = FastMCP(
+    "ecv-explorer",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["ecmwf.regexflow.com", "localhost", "127.0.0.1"],
+        allowed_origins=["https://ecmwf.regexflow.com", "http://localhost:*"],
+    )
+)
 
 
 @mcp.tool()
@@ -409,8 +417,7 @@ async def root():
 
 
 # Mount the SSE app - it provides /sse and /messages endpoints
-# Allow external hostname for proxied requests
-sse_app = mcp.sse_app(host="ecmwf.regexflow.com")
+sse_app = mcp.sse_app()
 app.mount("/", sse_app)
 
 
