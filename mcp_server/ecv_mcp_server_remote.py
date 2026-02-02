@@ -382,10 +382,10 @@ def get_value(dataset: str, longitude: float, latitude: float, year: int, month:
 from fastapi import FastAPI
 from starlette.routing import Mount
 
-# Get the MCP Starlette app
+# Get the MCP Starlette app - it has a route at /mcp internally
 mcp_app = mcp.streamable_http_app()
 
-# Create FastAPI app and mount MCP
+# Create FastAPI app
 app = FastAPI(title="ECV Explorer MCP Server")
 
 # Add CORS middleware
@@ -396,9 +396,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
-# Mount MCP app at /mcp
-app.mount("/mcp", mcp_app)
 
 
 @app.get("/health")
@@ -416,6 +413,10 @@ async def root():
         "health_endpoint": "/health",
         "docs": "Connect via Claude Desktop: Settings → Connectors → Add custom connector → URL"
     }
+
+
+# Mount MCP app LAST at root - it handles /mcp internally
+app.mount("/", mcp_app)
 
 
 if __name__ == "__main__":
