@@ -409,7 +409,8 @@ async def root():
 
 
 # Mount the SSE app - it provides /sse and /messages endpoints
-sse_app = mcp.sse_app()
+# Allow external hostname for proxied requests
+sse_app = mcp.sse_app(host="ecmwf.regexflow.com")
 app.mount("/", sse_app)
 
 
