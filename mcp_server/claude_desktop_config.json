@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "ecv-explorer": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--with", "mcp",
+        "--with", "httpx",
+        "--with", "numpy",
+        "--with", "blosc",
+        "/Users/garfieldconnolly/Desktop/ECMWF-POC/mcp_server/ecv_mcp_server.py"
+      ],
+      "env": {
+        "ECV_DATA_URL": "https://ecmwf.regexflow.com/zarr"
+      }
+    }
+  }
+}
