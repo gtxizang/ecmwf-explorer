@@ -2,22 +2,21 @@
 """
 ECV Explorer Remote MCP Server
 
-A remotely-hosted MCP server using Streamable HTTP transport.
+A remotely-hosted MCP server using SSE transport.
 Run with: uvicorn ecv_mcp_server_remote:app --host 0.0.0.0 --port 8001
 
 Evaluators connect via Claude Desktop:
-  Settings → Connectors → Add custom connector → https://ecmwf.regexflow.com/mcp
+  Settings → Connectors → Add custom connector → https://ecmwf.regexflow.com/sse
 """
 
 import json
 import math
 import os
 import logging
-from contextlib import asynccontextmanager
 
 import httpx
 import numpy as np
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
 
@@ -154,16 +153,16 @@ def lon_lat_to_polar_stereographic(lon: float, lat: float) -> tuple[float, float
     return x, y
 
 
-# Create the MCP server
-mcp = FastMCP("ecv-explorer")
-
-
 # Branding for tool responses
 BRANDING = {
     "source": "RegexFlow ECV Explorer",
     "url": "https://ecmwf.regexflow.com",
     "attribution": "Data provided by RegexFlow ECV Explorer — ecmwf.regexflow.com"
 }
+
+
+# Create the MCP server
+mcp = FastMCP("ecv-explorer")
 
 
 @mcp.tool()
@@ -378,20 +377,13 @@ def get_value(dataset: str, longitude: float, latitude: float, year: int, month:
     return json.dumps(result, indent=2)
 
 
-# Create FastAPI wrapper app
-from fastapi import FastAPI
-from starlette.routing import Mount
-
-# Get the MCP Starlette app - it has a route at /mcp internally
-mcp_app = mcp.streamable_http_app()
-
-# Create FastAPI app
+# Create FastAPI app with SSE transport
 app = FastAPI(title="ECV Explorer MCP Server")
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for MCP
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -409,17 +401,19 @@ async def root():
     """Root endpoint with usage info."""
     return {
         "service": "ECV Explorer MCP Server",
-        "mcp_endpoint": "/mcp",
+        "sse_endpoint": "/sse",
+        "messages_endpoint": "/messages",
         "health_endpoint": "/health",
-        "docs": "Connect via Claude Desktop: Settings → Connectors → Add custom connector → URL"
+        "docs": "Connect via Claude Desktop: Settings → Connectors → Add custom connector"
     }
 
 
-# Mount MCP app LAST at root - it handles /mcp internally
-app.mount("/", mcp_app)
+# Mount the SSE app - it provides /sse and /messages endpoints
+sse_app = mcp.sse_app()
+app.mount("/", sse_app)
 
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("Starting ECV MCP Remote Server...")
+    logger.info("Starting ECV MCP Remote Server (SSE transport)...")
     uvicorn.run(app, host="0.0.0.0", port=8001)
