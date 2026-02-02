@@ -20,6 +20,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.session import ServerSession
+
+# Workaround for SSE initialization race condition
+# See: https://github.com/modelcontextprotocol/python-sdk/issues/423
+_original_received_request = ServerSession._received_request
+
+async def _patched_received_request(self, *args, **kwargs):
+    try:
+        return await _original_received_request(self, *args, **kwargs)
+    except RuntimeError:
+        pass
+
+ServerSession._received_request = _patched_received_request
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
