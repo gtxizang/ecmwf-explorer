@@ -98,6 +98,23 @@ DATASETS = {
         "resolution": "25km (EASE2 Grid)",
         "spatial_coverage": "Northern Hemisphere (Arctic)",
     },
+    "sea_ice_with_quality": {
+        "id": "sea_ice_with_quality",
+        "name": "Sea Ice with Uncertainty (1 Year)",
+        "path": "/sea_ice_with_quality",
+        "variable": "ice_concentration",
+        "unit": "%",
+        "description": "Satellite-Derived — Arctic Sea Ice Concentration with Quality/Uncertainty Data — 2023",
+        "year_range": {"start": 2023, "end": 2023},
+        "projection": "EPSG:3413",
+        "source": {
+            "name": "Copernicus Climate Data Store",
+            "provider": "EUMETSAT OSI SAF",
+            "dataset": "Sea ice concentration with uncertainty estimates",
+        },
+        "resolution": "25km (EASE2 Grid)",
+        "spatial_coverage": "Northern Hemisphere (Arctic)",
+    },
     "solar_radiation_satellite": {
         "id": "satellite_radiation",
         "name": "Solar Radiation Satellite (24 Years)",
@@ -204,7 +221,7 @@ def get_dataset_info(dataset: str) -> str:
 
     Args:
         dataset: Dataset identifier. One of: soil_moisture, solar_radiation_era5,
-                 fire_burned_area, sea_ice, solar_radiation_satellite
+                 fire_burned_area, sea_ice, sea_ice_with_quality, solar_radiation_satellite
 
     Returns:
         Detailed metadata including temporal range, spatial resolution,
