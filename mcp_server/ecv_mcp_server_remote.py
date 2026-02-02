@@ -1,38 +1,32 @@
 #!/usr/bin/env python3
 """
-ECV Explorer MCP Server
+ECV Explorer Remote MCP Server
 
-An MCP (Model Context Protocol) server that provides AI assistants with access
-to ECMWF climate data from the ECV Explorer application.
+A remotely-hosted MCP server using Streamable HTTP transport.
+Run with: uvicorn ecv_mcp_server_remote:app --host 0.0.0.0 --port 8001
 
-Tools provided:
-- list_datasets: Get all available climate datasets
-- get_dataset_info: Get detailed metadata for a specific dataset
-- get_timeseries: Extract monthly timeseries at a geographic location
-- get_value: Get a single data value at a specific location and time
+Evaluators connect via Claude Desktop:
+  Settings → Connectors → Add custom connector → https://ecmwf.regexflow.com/mcp
 """
 
 import json
 import math
 import os
-import sys
+import logging
+from contextlib import asynccontextmanager
 
 import httpx
 import numpy as np
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
 
-# Log to stderr for debugging (shows in Claude Desktop logs)
-def log(msg):
-    print(msg, file=sys.stderr)
-
-log("ECV MCP Server starting...")
-
-# Create the MCP server
-mcp = FastMCP("ecv-explorer")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ecv-mcp-remote")
 
 # Base URL for the Zarr data store
 BASE_URL = os.environ.get("ECV_DATA_URL", "https://ecmwf.regexflow.com/zarr")
-log(f"Using data URL: {BASE_URL}")
 
 # Dataset configurations
 DATASETS = {
@@ -160,6 +154,10 @@ def lon_lat_to_polar_stereographic(lon: float, lat: float) -> tuple[float, float
     return x, y
 
 
+# Create the MCP server
+mcp = FastMCP("ecv-explorer")
+
+
 # Branding for tool responses
 BRANDING = {
     "source": "RegexFlow ECV Explorer",
@@ -174,7 +172,7 @@ def list_datasets() -> str:
 
     Returns dataset names, descriptions, temporal coverage, and data sources.
     """
-    log("list_datasets called")
+    logger.info("list_datasets called")
     result = {
         "datasets": [],
         "source": BRANDING["attribution"]
@@ -203,7 +201,7 @@ def get_dataset_info(dataset: str) -> str:
         Detailed metadata including temporal range, spatial resolution,
         data source, and projection information.
     """
-    log(f"get_dataset_info called for {dataset}")
+    logger.info(f"get_dataset_info called for {dataset}")
     if dataset not in DATASETS:
         return json.dumps({"error": f"Unknown dataset '{dataset}'. Available: {', '.join(DATASETS.keys())}"})
     result = {**DATASETS[dataset], "source_attribution": BRANDING["attribution"]}
@@ -223,7 +221,7 @@ def get_timeseries(dataset: str, longitude: float, latitude: float, year: int) -
     Returns:
         Monthly values for the entire year at the specified location.
     """
-    log(f"get_timeseries called: {dataset}, lon={longitude}, lat={latitude}, year={year}")
+    logger.info(f"get_timeseries called: {dataset}, lon={longitude}, lat={latitude}, year={year}")
 
     if dataset not in DATASETS:
         return json.dumps({"error": f"Unknown dataset '{dataset}'"})
@@ -243,7 +241,6 @@ def get_timeseries(dataset: str, longitude: float, latitude: float, year: int) -
         x, y = lon_lat_to_web_mercator(longitude, latitude)
 
     try:
-        # Fetch data from remote Zarr store
         import blosc
 
         # Use highest resolution level for accuracy
@@ -316,7 +313,7 @@ def get_timeseries(dataset: str, longitude: float, latitude: float, year: int) -
                     else:
                         value = None
                 except Exception as e:
-                    log(f"Error loading month {month_idx}: {e}")
+                    logger.warning(f"Error loading month {month_idx}: {e}")
                     value = None
 
                 timeseries.append({
@@ -337,7 +334,7 @@ def get_timeseries(dataset: str, longitude: float, latitude: float, year: int) -
         return json.dumps(result, indent=2)
 
     except Exception as e:
-        log(f"Error in get_timeseries: {e}")
+        logger.error(f"Error in get_timeseries: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -355,7 +352,7 @@ def get_value(dataset: str, longitude: float, latitude: float, year: int, month:
     Returns:
         The data value at the specified location and time.
     """
-    log(f"get_value called: {dataset}, lon={longitude}, lat={latitude}, year={year}, month={month}")
+    logger.info(f"get_value called: {dataset}, lon={longitude}, lat={latitude}, year={year}, month={month}")
 
     if month < 1 or month > 12:
         return json.dumps({"error": "Month must be between 1 and 12"})
@@ -381,6 +378,47 @@ def get_value(dataset: str, longitude: float, latitude: float, year: int, month:
     return json.dumps(result, indent=2)
 
 
+# Create FastAPI wrapper app
+from fastapi import FastAPI
+from starlette.routing import Mount
+
+# Get the MCP Starlette app
+mcp_app = mcp.streamable_http_app()
+
+# Create FastAPI app and mount MCP
+app = FastAPI(title="ECV Explorer MCP Server")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for MCP
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# Mount MCP app at /mcp
+app.mount("/mcp", mcp_app)
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring."""
+    return {"status": "healthy", "server": "ecv-explorer-mcp"}
+
+
+@app.get("/")
+async def root():
+    """Root endpoint with usage info."""
+    return {
+        "service": "ECV Explorer MCP Server",
+        "mcp_endpoint": "/mcp",
+        "health_endpoint": "/health",
+        "docs": "Connect via Claude Desktop: Settings → Connectors → Add custom connector → URL"
+    }
+
+
 if __name__ == "__main__":
-    log("Starting MCP server...")
-    mcp.run()
+    import uvicorn
+    logger.info("Starting ECV MCP Remote Server...")
+    uvicorn.run(app, host="0.0.0.0", port=8001)

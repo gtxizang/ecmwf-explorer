@@ -8,7 +8,10 @@ httpx>=0.27.0
 
 # Data handling
 numpy>=1.24.0
-zarr>=2.16.0
 
 # Compression (for Zarr chunks)
 blosc>=1.11.0
+
+# Remote server (for ecv_mcp_server_remote.py)
+fastapi>=0.110.0
+uvicorn>=0.27.0
