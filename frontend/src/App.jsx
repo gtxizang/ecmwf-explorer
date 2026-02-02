@@ -10,11 +10,24 @@ function App() {
   const getInitialViewMode = () => {
     const params = new URLSearchParams(window.location.search);
     const dataset = params.get('dataset');
-    return dataset === 'sea_ice' ? 'polar' : 'standard';
+    return (dataset === 'sea_ice' || dataset === 'sea_ice_with_quality') ? 'polar' : 'standard';
+  };
+
+  const getInitialPolarDataset = () => {
+    const params = new URLSearchParams(window.location.search);
+    const dataset = params.get('dataset');
+    return (dataset === 'sea_ice' || dataset === 'sea_ice_with_quality') ? dataset : 'sea_ice';
   };
 
   const [viewMode, setViewMode] = useState(getInitialViewMode);
+  const [polarDataset, setPolarDataset] = useState(getInitialPolarDataset);
   const [globeData, setGlobeData] = useState(null);
+
+  // Handler to switch to polar view with optional dataset
+  const handlePolarView = (dataset = 'sea_ice') => {
+    setPolarDataset(dataset);
+    setViewMode('polar');
+  };
 
   // Handler to switch to globe view with current data
   const handleGlobeView = (data) => {
@@ -25,7 +38,7 @@ function App() {
   return (
     <MantineProvider defaultColorScheme="dark">
       {viewMode === 'polar' ? (
-        <PolarMap onBack={() => setViewMode('standard')} />
+        <PolarMap onBack={() => setViewMode('standard')} initialDataset={polarDataset} />
       ) : viewMode === 'globe' ? (
         <GlobeView
           imageUrl={globeData?.imageUrl}
@@ -37,7 +50,7 @@ function App() {
         />
       ) : (
         <ZarrMap
-          onPolarView={() => setViewMode('polar')}
+          onPolarView={handlePolarView}
           onGlobeView={handleGlobeView}
         />
       )}

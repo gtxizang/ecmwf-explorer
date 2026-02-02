@@ -219,7 +219,7 @@ function applyColormap(data, width, height, vmin = 0, vmax = 100) {
   return rgba;
 }
 
-export default function PolarMap({ onBack }) {
+export default function PolarMap({ onBack, initialDataset = 'sea_ice_multiyear' }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const imageOverlayRef = useRef(null);
@@ -228,8 +228,13 @@ export default function PolarMap({ onBack }) {
   const [loading, setLoading] = useState(true);
   const [timeIndex, setTimeIndex] = useState(0);
   const [selectedYear, setSelectedYear] = useState(2020);
-  const [selectedPolarDataset, setSelectedPolarDataset] = useState('sea_ice_multiyear');
-  const [isMultiYear, setIsMultiYear] = useState(true); // Default to multi-year mode
+  // Map 'sea_ice' from ZarrMap to 'sea_ice_multiyear' in PolarMap
+  const getInitialDataset = () => {
+    if (initialDataset === 'sea_ice') return 'sea_ice_multiyear';
+    return initialDataset;
+  };
+  const [selectedPolarDataset, setSelectedPolarDataset] = useState(getInitialDataset);
+  const [isMultiYear, setIsMultiYear] = useState(initialDataset !== 'sea_ice_with_quality'); // Quality data is single year
   const [currentLevel, setCurrentLevel] = useState(1);
   const [currentZoom, setCurrentZoom] = useState(1);
   const [isPlaying, setIsPlaying] = useState(false);

@@ -406,6 +406,42 @@ const DATASETS = {
       chunking: '1 × 1 × 256 × 256 (year × month × y × x)',
     },
   },
+  sea_ice_with_quality: {
+    name: 'Sea Ice with Uncertainty (2023)',
+    path: '/zarr/sea_ice_with_quality',
+    variable: 'ice_concentration',
+    uncertaintyVariable: 'total_uncertainty',
+    maxLevel: 2,
+    unit: '%',
+    colorRange: { vmin: 0, vmax: 100 },
+    description: 'Sea Ice Concentration with Quality/Uncertainty Data — 2023',
+    defaultColormap: 'ice',
+    defaultSmoothing: 2,
+    introFact: 'Uncertainty quantification enables confidence assessment in climate data',
+    isMultiYear: false,
+    isPolar: true,
+    hasUncertainty: true,
+    source: {
+      name: 'Copernicus Climate Data Store',
+      url: 'https://cds.climate.copernicus.eu/datasets/satellite-sea-ice-concentration',
+      dataset: 'Sea ice concentration with quality layers',
+      provider: 'EUMETSAT OSI SAF',
+    },
+    rawData: {
+      resolution: '25km (EASE2 Grid)',
+      projection: 'EPSG:6931 (Lambert Azimuthal)',
+      temporalCoverage: '2023 (12 months)',
+      spatialCoverage: 'Northern Hemisphere',
+    },
+    processing: {
+      reprojection: 'EASE2 → EPSG:3413 (Polar Stereographic)',
+      pyramid: '3 levels (256px to 1024px)',
+      resampling: 'Bilinear interpolation',
+      format: 'Zarr v2 with Blosc compression',
+      chunking: '1 × 256 × 256 (time × y × x)',
+      qualityLayers: 'total_uncertainty, status_flag',
+    },
+  },
   satellite_radiation: {
     name: 'Solar Radiation Satellite (24 Years)',
     path: '/zarr/satellite_radiation',
@@ -2539,9 +2575,9 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
               setLoadEndTime(null);
               setLoadDuration(null);
               setShowWelcome(false); // Dismiss welcome when dataset selected
-              if (value === 'sea_ice' && onPolarView) {
-                // Switch to polar view for sea ice
-                onPolarView();
+              if ((value === 'sea_ice' || value === 'sea_ice_with_quality') && onPolarView) {
+                // Switch to polar view for sea ice datasets
+                onPolarView(value);
               } else {
                 setSelectedDataset(value);
                 // Reset year to valid range for new dataset
@@ -2556,7 +2592,7 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
             }}
             data={Object.entries(DATASETS).map(([key, cfg]) => ({
               value: key,
-              label: key === 'sea_ice' ? `${cfg.name} (Polar View)` : cfg.name,
+              label: (key === 'sea_ice' || key === 'sea_ice_with_quality') ? `${cfg.name} (Polar View)` : cfg.name,
             }))}
             styles={{
               input: { background: 'rgba(255,255,255,0.05)' },
