@@ -47,6 +47,15 @@ import {
 // Zarr loading with zarrita
 import * as zarr from 'zarrita';
 
+// Data loading optimizations (caching, deduplication, preloading)
+import {
+  dataCache,
+  imageCache as dataImageCache,
+  fetchDataDeduplicated,
+  preloadAdjacentTimeSlices,
+  getCacheStats,
+} from '../utils/dataOptimizations';
+
 // Settings panel and feature flags
 import { SettingsPanel } from './SettingsPanel';
 import { getFeatureFlags } from '../config/featureFlags';
@@ -1432,63 +1441,80 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
       try {
         // Open the Zarr store at the correct pyramid level
         const storeUrl = `${API_URL}${datasetConfig.path}/${targetLOD}`;
-        // console.log(`[ZARR] Opening store: ${storeUrl}, dataset: ${selectedDataset}, year: ${selectedYear}, month: ${timeIndex}`);
 
-        const store = new zarr.FetchStore(storeUrl);
-        const root = zarr.root(store);
+        // Cache key for coordinates (same for all time slices at this level)
+        const coordCacheKey = `${selectedDataset}-${targetLOD}-coords`;
 
-        // Open the data array
-        const arr = await zarr.open(root.resolve(datasetConfig.variable), { kind: 'array' });
-        // console.log(`[ZARR] Array shape: ${arr.shape}, dtype: ${arr.dtype}`);
+        // Cache key for data slice
+        const dataCacheKey = isMultiYear
+          ? `${selectedDataset}-${targetLOD}-${selectedYear}-${timeIndex}-data`
+          : `${selectedDataset}-${targetLOD}-${timeIndex}-data`;
 
         let height, width, rawData, xCoords, yCoords;
 
-        if (isMultiYear) {
-          // Multi-year format: [year, month, y, x] in Web Mercator (same as single-year)
+        // Fetch coordinates with caching (same for all time slices)
+        const coords = await fetchDataDeduplicated(coordCacheKey, async () => {
+          console.log(`[CACHE] Fetching coordinates for ${selectedDataset} L${targetLOD}`);
+          const store = new zarr.FetchStore(storeUrl);
+          const root = zarr.root(store);
+
           const xArr = await zarr.open(root.resolve('x'), { kind: 'array' });
           const yArr = await zarr.open(root.resolve('y'), { kind: 'array' });
-          const yearArr = await zarr.open(root.resolve('year'), { kind: 'array' });
+          const xResult = await zarr.get(xArr);
+          const yResult = await zarr.get(yArr);
 
-          // Find year index
-          const yearResult = await zarr.get(yearArr);
-          // Convert BigInt to Number (Zarr int64 returns BigInt in JS)
-          const years = Array.from(yearResult.data).map(y => Number(y));
-          // console.log(`[ZARR] Available years: ${years[0]} to ${years[years.length-1]} (${years.length} total), looking for ${selectedYear}`);
-          const yearIndex = years.indexOf(selectedYear);
-          if (yearIndex === -1) {
-            throw new Error(`Year ${selectedYear} not found in dataset. Available: ${years[0]}-${years[years.length-1]}`);
+          let years = null;
+          if (isMultiYear) {
+            const yearArr = await zarr.open(root.resolve('year'), { kind: 'array' });
+            const yearResult = await zarr.get(yearArr);
+            years = Array.from(yearResult.data).map(y => Number(y));
           }
 
-          height = arr.shape[2]; // y
-          width = arr.shape[3];  // x
+          // Also get array shape
+          const arr = await zarr.open(root.resolve(datasetConfig.variable), { kind: 'array' });
 
-          // console.log(`[ZARR] Loading slice [${yearIndex}(${selectedYear}), ${timeIndex}, :, :] (${height}x${width})`);
+          return {
+            x: Array.from(xResult.data),
+            y: Array.from(yResult.data),
+            years,
+            shape: arr.shape,
+          };
+        });
 
-          const result = await zarr.get(arr, [yearIndex, timeIndex, null, null]);
-          rawData = result.data;
+        xCoords = coords.x;
+        yCoords = coords.y;
 
-          // Load Web Mercator coordinates (same as single-year)
-          const xResult = await zarr.get(xArr);
-          const yResult = await zarr.get(yArr);
-          xCoords = Array.from(xResult.data);
-          yCoords = Array.from(yResult.data);
+        if (isMultiYear) {
+          height = coords.shape[2];
+          width = coords.shape[3];
+
+          const yearIndex = coords.years.indexOf(selectedYear);
+          if (yearIndex === -1) {
+            throw new Error(`Year ${selectedYear} not found in dataset. Available: ${coords.years[0]}-${coords.years[coords.years.length-1]}`);
+          }
+
+          // Fetch data slice with caching
+          rawData = await fetchDataDeduplicated(dataCacheKey, async () => {
+            console.log(`[CACHE] Fetching data slice ${selectedDataset} L${targetLOD} ${selectedYear}/${timeIndex}`);
+            const store = new zarr.FetchStore(storeUrl);
+            const root = zarr.root(store);
+            const arr = await zarr.open(root.resolve(datasetConfig.variable), { kind: 'array' });
+            const result = await zarr.get(arr, [yearIndex, timeIndex, null, null]);
+            return result.data;
+          });
         } else {
-          // Standard format: [time, y, x]
-          const xArr = await zarr.open(root.resolve('x'), { kind: 'array' });
-          const yArr = await zarr.open(root.resolve('y'), { kind: 'array' });
+          height = coords.shape[1];
+          width = coords.shape[2];
 
-          height = arr.shape[1];
-          width = arr.shape[2];
-
-          // console.log(`[ZARR] Loading slice [${timeIndex}, :, :] (${height}x${width})`);
-
-          const result = await zarr.get(arr, [timeIndex, null, null]);
-          rawData = result.data;
-
-          const xResult = await zarr.get(xArr);
-          const yResult = await zarr.get(yArr);
-          xCoords = Array.from(xResult.data);
-          yCoords = Array.from(yResult.data);
+          // Fetch data slice with caching
+          rawData = await fetchDataDeduplicated(dataCacheKey, async () => {
+            console.log(`[CACHE] Fetching data slice ${selectedDataset} L${targetLOD} ${timeIndex}`);
+            const store = new zarr.FetchStore(storeUrl);
+            const root = zarr.root(store);
+            const arr = await zarr.open(root.resolve(datasetConfig.variable), { kind: 'array' });
+            const result = await zarr.get(arr, [timeIndex, null, null]);
+            return result.data;
+          });
         }
 
         // Calculate bounds from coordinates
@@ -1572,6 +1598,13 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
         }
 
         // console.log(`[LOD] Successfully loaded level ${targetLOD} (cached)`);
+
+        // Preload adjacent time slices in background
+        preloadAdjacentTimeSlices(datasetConfig, timeIndex, targetLOD, {
+          lookahead: 2,
+          lookbehind: 1,
+          year: isMultiYear ? selectedYear : null,
+        });
 
       } catch (err) {
         if (err.name === 'AbortError') {

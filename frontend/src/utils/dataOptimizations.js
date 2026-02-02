@@ -97,16 +97,21 @@ export async function fetchDataDeduplicated(cacheKey, fetchFn) {
 
 /**
  * Preload adjacent time slices in the background
+ * Supports both single-year and multi-year datasets
  */
 export function preloadAdjacentTimeSlices(config, currentTime, level, options = {}) {
-  const { lookahead = 2, lookbehind = 1 } = options;
+  const { lookahead = 2, lookbehind = 1, year = null } = options;
+  const datasetKey = config.id || config.path.split('/').pop();
+  const isMultiYear = config.isMultiYear && year !== null;
 
   const preloadTasks = [];
 
   // Preload next slices (higher priority)
   for (let i = 1; i <= lookahead; i++) {
     const nextTime = (currentTime + i) % 12;
-    const cacheKey = `${config.path}-${level}-${nextTime}`;
+    const cacheKey = isMultiYear
+      ? `${datasetKey}-${level}-${year}-${nextTime}-data`
+      : `${datasetKey}-${level}-${nextTime}-data`;
 
     if (!dataCache.has(cacheKey)) {
       preloadTasks.push({
@@ -120,7 +125,9 @@ export function preloadAdjacentTimeSlices(config, currentTime, level, options = 
   // Preload previous slices (lower priority)
   for (let i = 1; i <= lookbehind; i++) {
     const prevTime = (currentTime - i + 12) % 12;
-    const cacheKey = `${config.path}-${level}-${prevTime}`;
+    const cacheKey = isMultiYear
+      ? `${datasetKey}-${level}-${year}-${prevTime}-data`
+      : `${datasetKey}-${level}-${prevTime}-data`;
 
     if (!dataCache.has(cacheKey)) {
       preloadTasks.push({
@@ -143,7 +150,7 @@ export function preloadAdjacentTimeSlices(config, currentTime, level, options = 
     const doLoad = async () => {
       try {
         console.log(`[PRELOAD] Background loading time ${task.time}`);
-        await loadZarrSlice(config, level, task.time);
+        await loadZarrSlice(config, level, task.time, year);
       } catch (err) {
         console.warn(`[PRELOAD] Failed to preload time ${task.time}:`, err.message);
       }
@@ -168,9 +175,16 @@ export function preloadAdjacentTimeSlices(config, currentTime, level, options = 
 
 /**
  * Load a single Zarr slice with caching and deduplication
+ * Supports both single-year and multi-year datasets
  */
-export async function loadZarrSlice(config, level, timeIndex) {
-  const cacheKey = `${config.path}-${level}-${timeIndex}`;
+export async function loadZarrSlice(config, level, timeIndex, year = null) {
+  // Use consistent cache key format with ZarrMap.jsx
+  const datasetKey = config.id || config.path.split('/').pop();
+  const isMultiYear = config.isMultiYear && year !== null;
+
+  const cacheKey = isMultiYear
+    ? `${datasetKey}-${level}-${year}-${timeIndex}-data`
+    : `${datasetKey}-${level}-${timeIndex}-data`;
 
   return fetchDataDeduplicated(cacheKey, async () => {
     const storeUrl = `${API_URL}${config.path}/${level}`;
@@ -178,26 +192,55 @@ export async function loadZarrSlice(config, level, timeIndex) {
     const root = zarr.root(store);
 
     const arr = await zarr.open(root.resolve(config.variable), { kind: 'array' });
-    const result = await zarr.get(arr, [timeIndex, null, null]);
 
-    // Also cache coordinates if not already
-    const coordKey = `${config.path}-${level}-coords`;
-    if (!dataCache.has(coordKey)) {
-      const xArr = await zarr.open(root.resolve('x'), { kind: 'array' });
-      const yArr = await zarr.open(root.resolve('y'), { kind: 'array' });
-      const xResult = await zarr.get(xArr);
-      const yResult = await zarr.get(yArr);
-      dataCache.set(coordKey, {
-        x: Array.from(xResult.data),
-        y: Array.from(yResult.data),
-      });
+    let result;
+    if (isMultiYear) {
+      // Multi-year: need to find year index first
+      const coordKey = `${datasetKey}-${level}-coords`;
+      let coords = dataCache.get(coordKey);
+
+      if (!coords) {
+        const xArr = await zarr.open(root.resolve('x'), { kind: 'array' });
+        const yArr = await zarr.open(root.resolve('y'), { kind: 'array' });
+        const yearArr = await zarr.open(root.resolve('year'), { kind: 'array' });
+        const xResult = await zarr.get(xArr);
+        const yResult = await zarr.get(yArr);
+        const yearResult = await zarr.get(yearArr);
+        coords = {
+          x: Array.from(xResult.data),
+          y: Array.from(yResult.data),
+          years: Array.from(yearResult.data).map(y => Number(y)),
+          shape: arr.shape,
+        };
+        dataCache.set(coordKey, coords);
+      }
+
+      const yearIndex = coords.years.indexOf(year);
+      if (yearIndex === -1) {
+        throw new Error(`Year ${year} not found`);
+      }
+
+      result = await zarr.get(arr, [yearIndex, timeIndex, null, null]);
+    } else {
+      // Single-year format
+      result = await zarr.get(arr, [timeIndex, null, null]);
+
+      // Cache coordinates if not already
+      const coordKey = `${datasetKey}-${level}-coords`;
+      if (!dataCache.has(coordKey)) {
+        const xArr = await zarr.open(root.resolve('x'), { kind: 'array' });
+        const yArr = await zarr.open(root.resolve('y'), { kind: 'array' });
+        const xResult = await zarr.get(xArr);
+        const yResult = await zarr.get(yArr);
+        dataCache.set(coordKey, {
+          x: Array.from(xResult.data),
+          y: Array.from(yResult.data),
+          shape: arr.shape,
+        });
+      }
     }
 
-    return {
-      data: result.data,
-      shape: arr.shape,
-      coords: dataCache.get(coordKey),
-    };
+    return result.data;
   });
 }
 
