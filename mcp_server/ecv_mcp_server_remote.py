@@ -68,7 +68,7 @@ DATASETS = {
         "unit": "J/m²",
         "description": "ERA5 Reanalysis — Surface Solar Radiation Downwards — 1950-2024",
         "year_range": {"start": 1950, "end": 2024},
-        "projection": "EPSG:3857",
+        "projection": "EPSG:4326",
         "source": {
             "name": "Copernicus Climate Data Store",
             "provider": "ECMWF",
@@ -85,7 +85,7 @@ DATASETS = {
         "unit": "m²",
         "description": "Satellite-Derived — C3S Fire Burned Area — 2019-2023",
         "year_range": {"start": 2019, "end": 2023},
-        "projection": "EPSG:3857",
+        "projection": "EPSG:4326",
         "source": {
             "name": "Copernicus Climate Data Store",
             "provider": "C3S / OLCI",
@@ -136,7 +136,7 @@ DATASETS = {
         "unit": "W/m²",
         "description": "Satellite-Derived — NASA CERES EBAF Incoming Shortwave — 2001-2024",
         "year_range": {"start": 2001, "end": 2024},
-        "projection": "EPSG:3857",
+        "projection": "EPSG:4326",
         "source": {
             "name": "Copernicus Climate Data Store",
             "provider": "NASA/CERES",
@@ -278,9 +278,12 @@ def get_timeseries(dataset: str, longitude: float, latitude: float, year: int) -
             "error": f"Year {year} out of range [{year_range['start']}-{year_range['end']}]"
         })
 
-    # Convert coordinates
+    # Convert coordinates based on dataset projection
     if ds["projection"] == "EPSG:3413":
         x, y = lon_lat_to_polar_stereographic(longitude, latitude)
+    elif ds["projection"] == "EPSG:4326":
+        # Data is in lat/lon, no transformation needed
+        x, y = longitude, latitude
     else:
         x, y = lon_lat_to_web_mercator(longitude, latitude)
 
