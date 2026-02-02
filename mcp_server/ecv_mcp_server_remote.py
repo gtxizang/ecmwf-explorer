@@ -82,7 +82,7 @@ DATASETS = {
         "name": "Fire Burned Area Satellite (5 Years)",
         "path": "/fire_multiyear",
         "variable": "burned_area",
-        "unit": "km²",
+        "unit": "m²",
         "description": "Satellite-Derived — C3S Fire Burned Area — 2019-2023",
         "year_range": {"start": 2019, "end": 2023},
         "projection": "EPSG:3857",
