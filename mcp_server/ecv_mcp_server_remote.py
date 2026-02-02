@@ -287,8 +287,16 @@ def get_timeseries(dataset: str, longitude: float, latitude: float, year: int) -
     try:
         import blosc
 
-        # Use highest resolution level for accuracy
-        level = 4 if "soil" in dataset or "radiation" in dataset else 3
+        # Use highest available resolution level for each dataset
+        level_map = {
+            "soil_moisture": 4,
+            "solar_radiation_era5": 3,
+            "fire_burned_area": 4,
+            "sea_ice": 3,
+            "sea_ice_with_quality": 3,
+            "solar_radiation_satellite": 2,
+        }
+        level = level_map.get(dataset, 3)
         url = f"{BASE_URL}{ds['path']}/{level}"
 
         with httpx.Client(timeout=60.0) as client:
