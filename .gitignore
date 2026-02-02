@@ -59,3 +59,27 @@ htmlcov/
 *.log
 .azure-sas-token
 .github-token
+
+# Internal docs (keep locally, don't push)
+CLAUDE.md
+CLIMATE_VISUALIZATION_REPORT.md
+ECMWF-POC-SPECIFICATION.md
+FRIDAY_UPDATE.md
+POST_MORTEM.md
+SESSION_*.md
+SLACK_MESSAGE_ERIC.md
+TILE_ARCHITECTURE_PROPOSAL.md
+explicit-directions.md
+zarrpocapproach.md
+
+# Tender documents (confidential)
+tenderdocumentation/
+
+# Test artifacts
+screenshots/
+frontend/test-screenshots/
+frontend/test-results/
+test_*.html
+test_*.png
+debug_*.png
+folium_test.html
