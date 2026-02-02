@@ -227,7 +227,7 @@ const EVALUATOR_CONTENT = {
   sections: [
     {
       heading: "What This POC Demonstrates",
-      content: "Testing GitHub auto deploy. Interactive visualization of Essential Climate Variables (ECVs) from the Copernicus Climate Data Store, using browser-based Zarr loading as specified in the tender clarifications.",
+      content: "Interactive visualization of Essential Climate Variables (ECVs) from the Copernicus Climate Data Store, using browser-based Zarr loading as specified in the tender clarifications.",
     },
     {
       heading: "Two Data Sources: Reanalysis + Satellite",
