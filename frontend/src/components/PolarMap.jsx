@@ -24,8 +24,6 @@ import {
   Divider,
   Anchor,
   CloseButton,
-  Modal,
-  Switch,
 } from '@mantine/core';
 import {
   LineChart,
@@ -117,31 +115,6 @@ const DATASETS = {
   fire_burned_area: { name: 'Fire Burned Area' },
   sea_ice: { name: 'Sea Ice (Polar View)' },
   sea_ice_multiyear: { name: 'Sea Ice (36 Years)' },
-  sea_ice_with_quality: { name: 'Sea Ice with Quality Data' },
-};
-
-// Polar dataset configurations (all EPSG:3413)
-const POLAR_DATASETS = {
-  sea_ice: {
-    path: '/zarr/sea_ice_polar',
-    variable: 'ice_concentration',
-    isMultiYear: false,
-    hasUncertainty: false,
-  },
-  sea_ice_multiyear: {
-    path: '/zarr/sea_ice_polar_multiyear',
-    variable: 'ice_concentration',
-    isMultiYear: true,
-    hasUncertainty: false,
-  },
-  sea_ice_with_quality: {
-    path: '/zarr/sea_ice_with_quality',
-    variable: 'ice_concentration',
-    uncertaintyVariable: 'total_uncertainty',
-    isMultiYear: false,
-    hasUncertainty: true,
-    maxLevel: 2,
-  },
 };
 
 // Multi-year sea ice configuration
@@ -223,12 +196,10 @@ export default function PolarMap({ onBack }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const imageOverlayRef = useRef(null);
-  const uncertaintyOverlayRef = useRef(null);
   const basemapLayerRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [timeIndex, setTimeIndex] = useState(0);
   const [selectedYear, setSelectedYear] = useState(2020);
-  const [selectedPolarDataset, setSelectedPolarDataset] = useState('sea_ice_multiyear');
   const [isMultiYear, setIsMultiYear] = useState(true); // Default to multi-year mode
   const [currentLevel, setCurrentLevel] = useState(1);
   const [currentZoom, setCurrentZoom] = useState(1);
@@ -236,11 +207,6 @@ export default function PolarMap({ onBack }) {
   const [techInfoOpen, setTechInfoOpen] = useState(true); // Default to open
   const [selectedBasemap, setSelectedBasemap] = useState('satellite');
   const playIntervalRef = useRef(null);
-
-  // Uncertainty visualization state
-  const [showUncertainty, setShowUncertainty] = useState(false);
-  const [uncertaintyModalOpen, setUncertaintyModalOpen] = useState(false);
-  const [uncertaintyModalShown, setUncertaintyModalShown] = useState(false);
 
   // Click-to-timeseries state
   const [clickedPoint, setClickedPoint] = useState(null); // { lng, lat }
@@ -395,21 +361,21 @@ export default function PolarMap({ onBack }) {
   }, [selectedBasemap]);
 
   // Load and display sea ice data
-  const loadSeaIceData = useCallback(async (level, time, year = null, multiYear = false, datasetKey = 'sea_ice_multiyear') => {
+  const loadSeaIceData = useCallback(async (level, time, year = null, multiYear = false) => {
     setLoading(true);
     const startTime = performance.now();
     setLoadStartTime(startTime);
     setLoadDuration(null);
     try {
-      // Get dataset config
-      const dsConfig = POLAR_DATASETS[datasetKey] || POLAR_DATASETS.sea_ice_multiyear;
-      const effectiveLevel = dsConfig.maxLevel !== undefined ? Math.min(level, dsConfig.maxLevel) : level;
-      const storePath = `${API_URL}${dsConfig.path}/${effectiveLevel}`;
-      console.log(`[POLAR] Loading ${datasetKey} level ${effectiveLevel}, ${multiYear ? `year ${year}, ` : ''}time ${time}`);
+      // Use multi-year or single-year path
+      const storePath = multiYear
+        ? `${API_URL}/zarr/sea_ice_polar_multiyear/${level}`
+        : `${API_URL}/zarr/sea_ice_polar/${level}`;
+      console.log(`[POLAR] Loading level ${level}, ${multiYear ? `year ${year}, ` : ''}time ${time}`);
 
       const store = new zarr.FetchStore(storePath);
       const root = zarr.root(store);
-      const arr = await zarr.open(root.resolve(dsConfig.variable), { kind: 'array' });
+      const arr = await zarr.open(root.resolve('ice_concentration'), { kind: 'array' });
 
       const shape = arr.shape;
       let size, slice;
@@ -556,109 +522,13 @@ export default function PolarMap({ onBack }) {
     loadTimeseriesRef.current = loadTimeseries;
   }, [loadTimeseries]);
 
-  // Load data when level, time, year, or dataset changes
+  // Load data when level, time, or year changes
   useEffect(() => {
     if (mapInstanceRef.current) {
-      console.log(`[POLAR] Time/Level changed - loading ${selectedPolarDataset}, ${isMultiYear ? `year=${selectedYear}, ` : ''}time=${timeIndex} (${MONTHS[timeIndex]}), level=${currentLevel}`);
-      loadSeaIceData(currentLevel, timeIndex, selectedYear, isMultiYear, selectedPolarDataset);
+      console.log(`[POLAR] Time/Level changed - loading ${isMultiYear ? `year=${selectedYear}, ` : ''}time=${timeIndex} (${MONTHS[timeIndex]}), level=${currentLevel}`);
+      loadSeaIceData(currentLevel, timeIndex, selectedYear, isMultiYear);
     }
-  }, [currentLevel, timeIndex, selectedYear, isMultiYear, selectedPolarDataset, loadSeaIceData]);
-
-  // Show modal when switching to sea_ice_with_quality (only once)
-  useEffect(() => {
-    const dsConfig = POLAR_DATASETS[selectedPolarDataset];
-    if (dsConfig?.hasUncertainty && !uncertaintyModalShown) {
-      setUncertaintyModalOpen(true);
-      setUncertaintyModalShown(true);
-    }
-    // Reset showUncertainty when switching away from quality dataset
-    if (!dsConfig?.hasUncertainty) {
-      setShowUncertainty(false);
-    }
-  }, [selectedPolarDataset, uncertaintyModalShown]);
-
-  // Load and display uncertainty overlay when enabled
-  useEffect(() => {
-    const dsConfig = POLAR_DATASETS[selectedPolarDataset];
-    if (!showUncertainty || !dsConfig?.hasUncertainty || !mapInstanceRef.current) {
-      // Remove uncertainty overlay if it exists
-      if (uncertaintyOverlayRef.current) {
-        uncertaintyOverlayRef.current.remove();
-        uncertaintyOverlayRef.current = null;
-      }
-      return;
-    }
-
-    const loadUncertaintyOverlay = async () => {
-      try {
-        const level = dsConfig.maxLevel !== undefined ? Math.min(currentLevel, dsConfig.maxLevel) : currentLevel;
-        const storePath = `${API_URL}${dsConfig.path}/${level}`;
-        const store = new zarr.FetchStore(storePath);
-        const root = zarr.root(store);
-        const arr = await zarr.open(root.resolve(dsConfig.uncertaintyVariable), { kind: 'array' });
-
-        const shape = arr.shape;
-        const size = shape[1];
-        const slice = await zarr.get(arr, [timeIndex, null, null]);
-        const uncertaintyData = slice.data;
-
-        // Create orange overlay for high uncertainty areas
-        const rgba = new Uint8ClampedArray(size * size * 4);
-        for (let i = 0; i < size * size; i++) {
-          const idx = i * 4;
-          const uncertainty = uncertaintyData[i];
-
-          if (isNaN(uncertainty) || uncertainty < 5) {
-            rgba[idx] = 0;
-            rgba[idx + 1] = 0;
-            rgba[idx + 2] = 0;
-            rgba[idx + 3] = 0;
-          } else if (uncertainty < 15) {
-            rgba[idx] = 255;
-            rgba[idx + 1] = 180;
-            rgba[idx + 2] = 0;
-            rgba[idx + 3] = Math.min(80, (uncertainty - 5) * 8);
-          } else if (uncertainty < 25) {
-            rgba[idx] = 255;
-            rgba[idx + 1] = 120;
-            rgba[idx + 2] = 0;
-            rgba[idx + 3] = Math.min(140, 80 + (uncertainty - 15) * 6);
-          } else {
-            rgba[idx] = 255;
-            rgba[idx + 1] = 60;
-            rgba[idx + 2] = 0;
-            rgba[idx + 3] = Math.min(200, 140 + (uncertainty - 25) * 3);
-          }
-        }
-
-        const canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext('2d');
-        const imageData = new ImageData(rgba, size, size);
-        ctx.putImageData(imageData, 0, 0);
-        const dataUrl = canvas.toDataURL();
-
-        const sw = mapInstanceRef.current.options.crs.unproject(L.point(SEA_ICE_BOUNDS.xmin, SEA_ICE_BOUNDS.ymin));
-        const ne = mapInstanceRef.current.options.crs.unproject(L.point(SEA_ICE_BOUNDS.xmax, SEA_ICE_BOUNDS.ymax));
-        const latLngBounds = L.latLngBounds(sw, ne);
-
-        if (uncertaintyOverlayRef.current) {
-          uncertaintyOverlayRef.current.setUrl(dataUrl);
-        } else {
-          uncertaintyOverlayRef.current = L.imageOverlay(dataUrl, latLngBounds, {
-            opacity: 0.8,
-            interactive: false,
-          }).addTo(mapInstanceRef.current);
-        }
-        console.log('[POLAR] Uncertainty overlay loaded');
-      } catch (error) {
-        console.error('[POLAR] Error loading uncertainty:', error);
-      }
-    };
-
-    loadUncertaintyOverlay();
-  }, [showUncertainty, selectedPolarDataset, timeIndex, currentLevel]);
+  }, [currentLevel, timeIndex, selectedYear, isMultiYear, loadSeaIceData]);
 
   // Handle autoplay - cycles through months and years for multi-year mode
   useEffect(() => {
@@ -891,20 +761,14 @@ export default function PolarMap({ onBack }) {
           <Select
             label="Dataset"
             size="xs"
-            value={selectedPolarDataset}
+            value={isMultiYear ? 'sea_ice_multiyear' : 'sea_ice'}
             onChange={(value) => {
               if (value === 'sea_ice') {
-                setSelectedPolarDataset('sea_ice');
                 setIsMultiYear(false);
-                setSelectedYear(2023);
+                setSelectedYear(2023); // Reset to single year
               } else if (value === 'sea_ice_multiyear') {
-                setSelectedPolarDataset('sea_ice_multiyear');
                 setIsMultiYear(true);
-                setSelectedYear(2020);
-              } else if (value === 'sea_ice_with_quality') {
-                setSelectedPolarDataset('sea_ice_with_quality');
-                setIsMultiYear(false);
-                setTimeIndex(0);
+                setSelectedYear(2020); // Default to 2020
               } else if (onBack) {
                 onBack();
               }
@@ -991,43 +855,17 @@ export default function PolarMap({ onBack }) {
             )}
           </div>
 
-          {/* Uncertainty Toggle - only for sea_ice_with_quality */}
-          {POLAR_DATASETS[selectedPolarDataset]?.hasUncertainty && (
-            <Group justify="space-between" align="center" mt="xs">
-              <div>
-                <Text size="xs" c="dimmed">Uncertainty Overlay</Text>
-                <Text size="xs" c="dimmed" style={{ fontSize: '10px', opacity: 0.7 }}>
-                  Highlight high uncertainty areas
-                </Text>
-              </div>
-              <Switch
-                checked={showUncertainty}
-                onChange={(e) => setShowUncertainty(e.currentTarget.checked)}
-                color="orange"
-                size="sm"
-              />
-            </Group>
-          )}
-
           {/* Description */}
           <Text size="xs" c="dimmed" mt="xs">
-            {selectedPolarDataset === 'sea_ice_with_quality'
-              ? 'Arctic Sea Ice with Quality Data — Sample'
-              : `Arctic Sea Ice Concentration — ${isMultiYear ? `${SEA_ICE_MULTIYEAR.yearRange.start}-${SEA_ICE_MULTIYEAR.yearRange.end}` : '2023'}`
-            }
+            Arctic Sea Ice Concentration — {isMultiYear ? `${SEA_ICE_MULTIYEAR.yearRange.start}-${SEA_ICE_MULTIYEAR.yearRange.end}` : '2023'}
           </Text>
 
           {/* Badges */}
           <Group gap={4}>
-            <Badge size="xs" color="cyan" variant="light">
-              {selectedPolarDataset === 'sea_ice_with_quality' ? '3 LOD LEVELS' : '4 LOD LEVELS'}
-            </Badge>
+            <Badge size="xs" color="cyan" variant="light">4 LOD LEVELS</Badge>
             <Badge size="xs" color="teal" variant="light">ZARR V2</Badge>
             {isMultiYear && (
               <Badge size="xs" color="grape" variant="light">{SEA_ICE_MULTIYEAR.totalYears} YEARS</Badge>
-            )}
-            {POLAR_DATASETS[selectedPolarDataset]?.hasUncertainty && (
-              <Badge size="xs" color="orange" variant="light">QUALITY DATA</Badge>
             )}
           </Group>
         </Stack>
@@ -1270,46 +1108,6 @@ export default function PolarMap({ onBack }) {
           transition: all 0.2s ease;
         }
       `}</style>
-
-      {/* Uncertainty Modal - shown when switching to sea_ice_with_quality */}
-      <Modal
-        opened={uncertaintyModalOpen}
-        onClose={() => setUncertaintyModalOpen(false)}
-        title="Dataset with Quality Data"
-        centered
-        overlayProps={{ backgroundOpacity: 0.55, blur: 3 }}
-        styles={{
-          header: { background: 'rgba(26, 26, 46, 0.98)' },
-          content: { background: 'rgba(26, 26, 46, 0.98)' },
-          title: { color: '#4fd1c5', fontWeight: 700 },
-        }}
-      >
-        <Stack gap="md">
-          <Text size="sm" c="dimmed">
-            This dataset includes <Text span c="orange" fw={600}>uncertainty</Text> and{' '}
-            <Text span c="cyan" fw={600}>quality flag</Text> information.
-          </Text>
-          <Text size="sm" c="dimmed">
-            Toggle the uncertainty overlay to visualise data reliability:
-          </Text>
-          <Group gap="xs">
-            <Badge color="orange" variant="light">High uncertainty</Badge>
-            <Text size="xs" c="dimmed">= lower confidence in values</Text>
-          </Group>
-          <Text size="xs" c="dimmed" style={{ fontStyle: 'italic', marginTop: 8 }}>
-            Use the "Uncertainty Overlay" toggle in the controls panel.
-          </Text>
-          <ActionIcon
-            variant="filled"
-            color="cyan"
-            size="lg"
-            onClick={() => setUncertaintyModalOpen(false)}
-            style={{ alignSelf: 'center', marginTop: 8 }}
-          >
-            <Text size="sm" fw={600}>Got it</Text>
-          </ActionIcon>
-        </Stack>
-      </Modal>
     </div>
   );
 }
