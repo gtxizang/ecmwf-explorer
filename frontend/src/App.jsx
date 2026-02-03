@@ -2,14 +2,16 @@
  * App.jsx - Unified Architecture with Solution Selector
  *
  * Allows user to choose between:
- * - Option 1: OpenLayers (native multi-CRS support)
- * - Option 2: Leaflet (proj4leaflet for multi-CRS)
+ * - Option 1: OpenLayers (native multi-CRS support) - 2D
+ * - Option 2: Leaflet (proj4leaflet for multi-CRS) - 2D
+ * - Option 3: deck.gl (GlobeView for 3D rotating globe)
  */
 
 import { useState } from 'react';
 import { MantineProvider } from '@mantine/core';
 import OpenLayersUnifiedMap from './components/OpenLayersUnifiedMap';
 import LeafletUnifiedMap from './components/LeafletUnifiedMap';
+import CesiumGlobeMap from './components/CesiumGlobeMap';
 
 function App() {
   const [showWelcome, setShowWelcome] = useState(true);
@@ -31,6 +33,8 @@ function App() {
         <WelcomeScreen onEnter={handleEnter} />
       ) : selectedSolution === 'openlayers' ? (
         <OpenLayersUnifiedMap onShowWelcome={handleShowWelcome} />
+      ) : selectedSolution === 'globe' ? (
+        <CesiumGlobeMap onShowWelcome={handleShowWelcome} />
       ) : (
         <LeafletUnifiedMap onShowWelcome={handleShowWelcome} />
       )}
@@ -77,6 +81,7 @@ function WelcomeScreen({ onEnter }) {
       }}>
         <Badge>EPSG:3857</Badge>
         <Badge>EPSG:3413</Badge>
+        <Badge color="violet">3D Globe</Badge>
         <Badge>Zarr</Badge>
         <Badge>LOD Pyramids</Badge>
       </div>
@@ -89,12 +94,26 @@ function WelcomeScreen({ onEnter }) {
         display: 'flex',
         gap: '1.5rem',
         marginBottom: '2rem',
+        flexWrap: 'wrap',
+        justifyContent: 'center',
       }}>
+        {/* CesiumJS Option - Primary */}
+        <SolutionCard
+          title="CesiumJS 2D/3D"
+          description="Unified 2D + 3D with polar reprojection"
+          features={['3D Globe + 2D Map toggle', 'Polar data reprojected', 'All datasets supported']}
+          color="#b794f4"
+          isHovered={hoveredSolution === 'globe'}
+          onMouseEnter={() => setHoveredSolution('globe')}
+          onMouseLeave={() => setHoveredSolution(null)}
+          onClick={() => onEnter('globe')}
+        />
+
         {/* OpenLayers Option */}
         <SolutionCard
-          title="OpenLayers"
+          title="OpenLayers 2D"
           description="Native multi-CRS support with proj4 registration"
-          features={['Native projection support', 'ImageStatic layers', 'Smooth pan/zoom']}
+          features={['EPSG:3857 + EPSG:3413', 'ImageStatic layers', 'Smooth pan/zoom']}
           color="#ed8936"
           isHovered={hoveredSolution === 'openlayers'}
           onMouseEnter={() => setHoveredSolution('openlayers')}
@@ -104,9 +123,9 @@ function WelcomeScreen({ onEnter }) {
 
         {/* Leaflet Option */}
         <SolutionCard
-          title="Leaflet"
+          title="Leaflet 2D"
           description="proj4leaflet for multi-CRS support"
-          features={['Lightweight & fast', 'Canvas rendering', 'Wide ecosystem']}
+          features={['EPSG:3857 + EPSG:3413', 'Canvas rendering', 'Wide ecosystem']}
           color="#4fd1c5"
           isHovered={hoveredSolution === 'leaflet'}
           onMouseEnter={() => setHoveredSolution('leaflet')}
@@ -117,7 +136,7 @@ function WelcomeScreen({ onEnter }) {
 
       {/* Quick enter button */}
       <button
-        onClick={() => onEnter('leaflet')}
+        onClick={() => onEnter('globe')}
         style={{
           padding: '0.75rem 2rem',
           fontSize: '0.875rem',
@@ -138,28 +157,35 @@ function WelcomeScreen({ onEnter }) {
           e.target.style.color = '#888';
         }}
       >
-        Enter Explorer (Leaflet)
+        Enter Explorer (CesiumJS)
       </button>
     </div>
   );
 }
 
 function SolutionCard({ title, description, features, color, isHovered, onMouseEnter, onMouseLeave, onClick }) {
+  const colorToRgb = {
+    '#ed8936': '237, 137, 54',
+    '#4fd1c5': '79, 209, 197',
+    '#b794f4': '183, 148, 244',
+  };
+  const rgb = colorToRgb[color] || '79, 209, 197';
+
   return (
     <div
       onClick={onClick}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
       style={{
-        width: 220,
+        width: 200,
         padding: '1.5rem',
-        background: isHovered ? `rgba(${color === '#ed8936' ? '237, 137, 54' : '79, 209, 197'}, 0.1)` : 'rgba(255,255,255,0.02)',
+        background: isHovered ? `rgba(${rgb}, 0.1)` : 'rgba(255,255,255,0.02)',
         border: `1px solid ${isHovered ? color : 'rgba(255,255,255,0.1)'}`,
         borderRadius: '12px',
         cursor: 'pointer',
         transition: 'all 0.2s',
         transform: isHovered ? 'translateY(-4px)' : 'translateY(0)',
-        boxShadow: isHovered ? `0 8px 30px rgba(${color === '#ed8936' ? '237, 137, 54' : '79, 209, 197'}, 0.2)` : 'none',
+        boxShadow: isHovered ? `0 8px 30px rgba(${rgb}, 0.2)` : 'none',
       }}
     >
       <h3 style={{
@@ -205,6 +231,7 @@ function Badge({ children, color = 'cyan' }) {
   const colors = {
     cyan: { text: '#4fd1c5', bg: 'rgba(79, 209, 197, 0.1)', border: 'rgba(79, 209, 197, 0.3)' },
     orange: { text: '#ed8936', bg: 'rgba(237, 137, 54, 0.1)', border: 'rgba(237, 137, 54, 0.3)' },
+    violet: { text: '#b794f4', bg: 'rgba(183, 148, 244, 0.1)', border: 'rgba(183, 148, 244, 0.3)' },
   };
   const c = colors[color] || colors.cyan;
   return (

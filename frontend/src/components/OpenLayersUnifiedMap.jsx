@@ -292,7 +292,7 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
         extent: gibsExtent,
       });
 
-      // Polar Stereographic view
+      // Polar Stereographic view - optimized for smooth zoom
       view = new View({
         projection: EPSG3413,
         center: [0, 0],
@@ -300,6 +300,9 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
         minZoom: 0,
         maxZoom: 5,
         extent: gibsExtent,
+        smoothExtentConstraint: true,
+        smoothResolutionConstraint: true,
+        constrainOnlyCenter: true,
       });
 
       // NASA GIBS polar basemap with proper tile grid
@@ -310,13 +313,15 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
         wrapX: false,
       });
     } else {
-      // Web Mercator view (default)
+      // Web Mercator view (default) - optimized for smooth zoom
       view = new View({
         projection: EPSG3857,
         center: [0, 3000000],
         zoom: 2,
         minZoom: 1,
         maxZoom: 12,
+        smoothExtentConstraint: true,
+        smoothResolutionConstraint: true,
       });
 
       // CARTO dark basemap
@@ -347,11 +352,11 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
         clearTimeout(zoomTimeoutRef.current);
       }
 
-      // Debounce LOD level changes to prevent flash during zoom animations
+      // Debounce LOD level changes - longer delay for smoother experience
       zoomTimeoutRef.current = setTimeout(() => {
         const newLevel = Math.max(0, Math.floor(z) + 1);
         setCurrentLevel(newLevel);
-      }, 150);
+      }, 250);
     });
 
     // Handle click for timeseries
@@ -436,15 +441,18 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
         datasetConfig.vmax
       );
 
-      // Create image
+      // Create image with optimized canvas
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: false, alpha: true });
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       const imageData = new ImageData(rgba, width, height);
       ctx.putImageData(imageData, 0, 0);
 
-      const dataUrl = canvas.toDataURL();
+      // Use PNG for better quality
+      const dataUrl = canvas.toDataURL('image/png');
 
       // Get data extent from Zarr coordinates
       const xArr = await zarr.open(root.resolve('x'), { kind: 'array' });
@@ -1089,6 +1097,29 @@ Selected: ${selectedYear}, ${MONTHS[timeIndex]}` : ''}`;
         @keyframes shimmer {
           0% { background-position: -200% 0; }
           100% { background-position: 200% 0; }
+        }
+
+        /* GPU acceleration for OpenLayers layers */
+        .ol-layer {
+          will-change: transform, opacity;
+          transform: translateZ(0);
+          backface-visibility: hidden;
+        }
+
+        /* Smooth canvas transitions */
+        .ol-layer canvas {
+          image-rendering: auto;
+          will-change: transform;
+        }
+
+        /* Smooth opacity transitions for data layer */
+        .ol-layer.ol-layer-image {
+          transition: opacity 0.15s ease-out;
+        }
+
+        /* Prevent tile loading flash */
+        .ol-layer.ol-layer-tile img {
+          transition: opacity 0.15s ease-out;
         }
       `}</style>
     </div>

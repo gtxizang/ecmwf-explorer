@@ -283,7 +283,10 @@ export default function LeafletUnifiedMap({ onShowWelcome }) {
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const imageOverlayRef = useRef(null);
+  const pendingOverlayRef = useRef(null);
   const basemapLayerRef = useRef(null);
+  const zoomTimeoutRef = useRef(null);
+  const lastLoadKeyRef = useRef(null);
 
   // State
   const [selectedDataset, setSelectedDataset] = useState(null);
@@ -361,14 +364,26 @@ export default function LeafletUnifiedMap({ onShowWelcome }) {
       maxZoom: maxZoom,
       zoomControl: false,
       attributionControl: true,
+      // Buttery smooth zoom settings
+      zoomAnimation: true,
+      zoomAnimationThreshold: 6,
+      fadeAnimation: true,
+      markerZoomAnimation: true,
+      wheelPxPerZoomLevel: 120, // Slower scroll = smoother zoom
+      zoomSnap: 0.25, // Allow fractional zooms for smoother feel
+      zoomDelta: 0.5, // Smaller zoom steps
     });
 
-    // Add basemap
+    // Add basemap with smooth tile loading
     const basemapConfig = BASEMAPS[projection] || BASEMAPS['EPSG:3857'];
     basemapLayerRef.current = L.tileLayer(basemapConfig.url, {
       tileSize: basemapConfig.tileSize || 256,
       attribution: basemapConfig.attribution,
       noWrap: projection !== 'EPSG:3413',
+      // Smooth tile loading settings
+      updateWhenZooming: false, // Don't reload during zoom animation
+      updateWhenIdle: true, // Load tiles after pan/zoom stops
+      keepBuffer: 4, // Keep extra tiles around view for smoother panning
     }).addTo(map);
 
     // Add graticule for polar view
@@ -386,13 +401,24 @@ export default function LeafletUnifiedMap({ onShowWelcome }) {
       }
     }
 
-    // Event handlers
+    // Event handlers - optimized for smooth zoom
+    map.on('zoom', () => {
+      // Update zoom display during zoom (not just at end)
+      setCurrentZoom(map.getZoom());
+    });
+
     map.on('zoomend', () => {
       const z = map.getZoom();
       setCurrentZoom(z);
-      // Don't cap here - let loadData cap based on dataset's maxLevel
-      const newLevel = Math.max(0, Math.floor(z) + 1);
-      setCurrentLevel(newLevel);
+
+      // Debounce level changes - wait for zoom to settle before loading new data
+      if (zoomTimeoutRef.current) {
+        clearTimeout(zoomTimeoutRef.current);
+      }
+      zoomTimeoutRef.current = setTimeout(() => {
+        const newLevel = Math.max(0, Math.floor(z) + 1);
+        setCurrentLevel(newLevel);
+      }, 250); // Longer debounce for smoother experience
     });
 
     map.on('click', (e) => {
@@ -414,12 +440,20 @@ export default function LeafletUnifiedMap({ onShowWelcome }) {
   const loadData = useCallback(async () => {
     if (!selectedDataset || !mapInstanceRef.current || !datasetConfig) return;
 
+    const maxLevel = datasetConfig.maxLevel || 3;
+    const level = Math.min(currentLevel, maxLevel);
+
+    // Skip if same data is already loaded (prevents flicker)
+    const loadKey = `${selectedDataset}-${level}-${timeIndex}-${selectedYear}`;
+    if (loadKey === lastLoadKeyRef.current) {
+      console.log(`[LEAFLET] Skipping reload, same data: ${loadKey}`);
+      return;
+    }
+
     setLoading(true);
     const startTime = performance.now();
 
     try {
-      const maxLevel = datasetConfig.maxLevel || 3;
-      const level = Math.min(currentLevel, maxLevel);
       const storePath = `${API_URL}${datasetConfig.path}/${level}`;
       console.log(`[LEAFLET] Loading ${selectedDataset} level ${level} (max: ${maxLevel})`);
 
@@ -468,14 +502,18 @@ export default function LeafletUnifiedMap({ onShowWelcome }) {
         datasetConfig.vmax
       );
 
-      // Create image
+      // Create image with optimized canvas
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d');
+      // Use willReadFrequently for better GPU path selection
+      const ctx = canvas.getContext('2d', { willReadFrequently: false, alpha: true });
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       const imageData = new ImageData(rgba, width, height);
       ctx.putImageData(imageData, 0, 0);
-      const dataUrl = canvas.toDataURL();
+      // Use PNG for better quality (JPEG has artifacts at edges)
+      const dataUrl = canvas.toDataURL('image/png');
 
       // Get data bounds
       let latLngBounds;
@@ -505,17 +543,32 @@ export default function LeafletUnifiedMap({ onShowWelcome }) {
         latLngBounds = L.latLngBounds([south, west], [north, east]);
       }
 
-      // Update or create overlay
-      if (imageOverlayRef.current) {
-        imageOverlayRef.current.setUrl(dataUrl);
-        imageOverlayRef.current.setBounds(latLngBounds);
-        imageOverlayRef.current.setOpacity(opacity);
-      } else {
-        imageOverlayRef.current = L.imageOverlay(dataUrl, latLngBounds, {
-          opacity: opacity,
-          interactive: false,
-        }).addTo(mapInstanceRef.current);
-      }
+      // Double-buffering: Create new layer, fade in, then remove old layer
+      // This prevents visual glitching during data updates
+      const oldOverlay = imageOverlayRef.current;
+
+      // Create new overlay (initially transparent)
+      const newOverlay = L.imageOverlay(dataUrl, latLngBounds, {
+        opacity: 0,
+        interactive: false,
+        className: 'data-overlay-smooth',
+        zIndex: 100,
+      }).addTo(mapInstanceRef.current);
+
+      // Fade in new layer
+      requestAnimationFrame(() => {
+        newOverlay.setOpacity(opacity);
+
+        // Remove old layer after brief delay (allows smooth crossfade)
+        setTimeout(() => {
+          if (oldOverlay) {
+            oldOverlay.remove();
+          }
+        }, 50);
+      });
+
+      imageOverlayRef.current = newOverlay;
+      lastLoadKeyRef.current = loadKey;
 
       const duration = performance.now() - startTime;
       setLoadDuration(duration);
@@ -648,11 +701,12 @@ export default function LeafletUnifiedMap({ onShowWelcome }) {
 
   // Handle dataset change
   const handleDatasetChange = (value) => {
-    // Clear existing overlay
+    // Clear existing overlay and reset load tracking
     if (imageOverlayRef.current) {
       imageOverlayRef.current.remove();
       imageOverlayRef.current = null;
     }
+    lastLoadKeyRef.current = null; // Reset to force load of new dataset
     setClickedPoint(null);
     setTimeseries(null);
     setTimeIndex(0);
@@ -1165,6 +1219,49 @@ Loader: zarrita.js`;
           background: rgba(26, 26, 46, 0.8) !important;
           color: rgba(255,255,255,0.5) !important;
           font-size: 10px !important;
+        }
+
+        /* GPU acceleration for all map layers */
+        .leaflet-tile-container,
+        .leaflet-overlay-pane,
+        .leaflet-map-pane {
+          will-change: transform;
+          transform: translateZ(0);
+          backface-visibility: hidden;
+        }
+
+        /* Data overlay - GPU accelerated with smooth opacity transitions */
+        .data-overlay-smooth {
+          will-change: transform, opacity;
+          transform: translateZ(0);
+          backface-visibility: hidden;
+          transition: opacity 0.15s ease-out !important;
+          image-rendering: auto;
+        }
+
+        /* During zoom animation - smooth transform */
+        .leaflet-zoom-anim .data-overlay-smooth {
+          transition: transform 0.25s cubic-bezier(0,0,0.25,1), opacity 0.15s ease-out !important;
+        }
+
+        /* Prevent blurry scaling during zoom */
+        .leaflet-image-layer {
+          image-rendering: auto;
+        }
+
+        /* Smooth tile fade-in */
+        .leaflet-tile {
+          transition: opacity 0.2s ease-in-out;
+        }
+
+        /* Hide tile loading artifacts */
+        .leaflet-tile-container img {
+          transition: opacity 0.15s ease-out;
+        }
+
+        /* Disable tile fade for instant appearance when cached */
+        .leaflet-fade-anim .leaflet-tile {
+          transition: opacity 0.2s linear;
         }
       `}</style>
     </div>

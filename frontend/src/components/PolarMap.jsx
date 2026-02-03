@@ -289,7 +289,7 @@ export default function PolarMap({ onBack, initialDataset = 'sea_ice_multiyear' 
       }
     );
 
-    // Create the map
+    // Create the map with smooth zoom settings
     const map = L.map(mapRef.current, {
       crs: crs,
       center: [80, 0],
@@ -298,6 +298,10 @@ export default function PolarMap({ onBack, initialDataset = 'sea_ice_multiyear' 
       maxZoom: 5,
       zoomControl: false,
       attributionControl: true,
+      // Smooth zoom settings (matching LeafletUnifiedMap)
+      wheelPxPerZoomLevel: 120,
+      zoomSnap: 0.25,
+      zoomDelta: 0.5,
     });
 
     // Add NASA GIBS basemap (initial)
