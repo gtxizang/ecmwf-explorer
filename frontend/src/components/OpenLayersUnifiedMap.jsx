@@ -15,6 +15,7 @@ import TileLayer from 'ol/layer/Tile';
 import ImageLayer from 'ol/layer/Image';
 import XYZ from 'ol/source/XYZ';
 import ImageStatic from 'ol/source/ImageStatic';
+import TileGrid from 'ol/tilegrid/TileGrid';
 import { register } from 'ol/proj/proj4';
 import { get as getProjection, transform } from 'ol/proj';
 import proj4 from 'proj4';
@@ -62,9 +63,12 @@ register(proj4);
 const EPSG3857 = getProjection('EPSG:3857');
 const EPSG3413 = getProjection('EPSG:3413');
 
-// Set extent for polar projection
+// Configure polar projection with proper extents
 if (EPSG3413) {
-  EPSG3413.setExtent([-4194304, -4194304, 4194304, 4194304]);
+  // World extent (lat/lng bounds for North Pole region)
+  EPSG3413.setWorldExtent([-180, 33, 180, 90]);
+  // Projected extent must encompass sea ice data bounds (-3850000, -5350000) to (3750000, 5850000)
+  EPSG3413.setExtent([-6000000, -6000000, 6000000, 6000000]);
 }
 
 // ============================================================================
@@ -276,21 +280,34 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
     let view, basemapSource;
 
     if (projection === 'EPSG:3413') {
+      // GIBS tile grid configuration (must match GIBS WMTS)
+      const gibsResolutions = [8192, 4096, 2048, 1024, 512, 256];
+      const gibsOrigin = [-4194304, 4194304];
+      const gibsExtent = [-4194304, -4194304, 4194304, 4194304];
+
+      const gibsTileGrid = new TileGrid({
+        origin: gibsOrigin,
+        resolutions: gibsResolutions,
+        tileSize: 512,
+        extent: gibsExtent,
+      });
+
       // Polar Stereographic view
       view = new View({
         projection: EPSG3413,
         center: [0, 0],
         zoom: 2,
         minZoom: 0,
-        maxZoom: 6,
+        maxZoom: 5,
+        extent: gibsExtent,
       });
 
-      // NASA GIBS polar basemap
+      // NASA GIBS polar basemap with proper tile grid
       basemapSource = new XYZ({
         url: 'https://gibs.earthdata.nasa.gov/wmts/epsg3413/best/BlueMarble_NextGeneration/default/500m/{z}/{y}/{x}.jpeg',
         projection: EPSG3413,
-        tileSize: 512,
-        maxZoom: 5,
+        tileGrid: gibsTileGrid,
+        wrapX: false,
       });
     } else {
       // Web Mercator view (default)
@@ -426,28 +443,24 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
       const ctx = canvas.getContext('2d');
       const imageData = new ImageData(rgba, width, height);
       ctx.putImageData(imageData, 0, 0);
+
       const dataUrl = canvas.toDataURL();
 
-      // Get data extent
-      let extent;
-      if (isPolar && datasetConfig.extent) {
-        extent = datasetConfig.extent;
-      } else {
-        // Web Mercator - get bounds from Zarr coordinates
-        const xArr = await zarr.open(root.resolve('x'), { kind: 'array' });
-        const yArr = await zarr.open(root.resolve('y'), { kind: 'array' });
-        const xResult = await zarr.get(xArr);
-        const yResult = await zarr.get(yArr);
-        const xCoords = Array.from(xResult.data);
-        const yCoords = Array.from(yResult.data);
+      // Get data extent from Zarr coordinates
+      const xArr = await zarr.open(root.resolve('x'), { kind: 'array' });
+      const yArr = await zarr.open(root.resolve('y'), { kind: 'array' });
+      const xResult = await zarr.get(xArr);
+      const yResult = await zarr.get(yArr);
+      const xCoords = Array.from(xResult.data);
+      const yCoords = Array.from(yResult.data);
 
-        extent = [
-          xCoords[0],
-          yCoords[yCoords.length - 1],
-          xCoords[xCoords.length - 1],
-          yCoords[0]
-        ];
-      }
+      // For ImageStatic, extent is [minX, minY, maxX, maxY]
+      const yMin = Math.min(yCoords[0], yCoords[yCoords.length - 1]);
+      const yMax = Math.max(yCoords[0], yCoords[yCoords.length - 1]);
+      const xMin = Math.min(xCoords[0], xCoords[xCoords.length - 1]);
+      const xMax = Math.max(xCoords[0], xCoords[xCoords.length - 1]);
+      const extent = [xMin, yMin, xMax, yMax];
+      console.log(`[POLAR] extent: [${extent.join(', ')}]`);
 
       // Store reference to old layer
       const oldLayer = dataLayerRef.current;
@@ -610,6 +623,8 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
       dataLayerRef.current.setOpacity(opacity);
     }
   }, [opacity]);
+
+
 
   // Handle dataset change
   const handleDatasetChange = (value) => {
@@ -814,6 +829,7 @@ Selected: ${selectedYear}, ${MONTHS[timeIndex]}` : ''}`;
             <Badge size="xs" color="orange" variant="light">OPENLAYERS</Badge>
             <Badge size="xs" color="teal" variant="light">ZARR</Badge>
           </Group>
+
         </Stack>
       </Paper>
 
