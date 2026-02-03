@@ -748,7 +748,7 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
   const [viewState, setViewState] = useState({
     longitude: 5,
     latitude: 50,
-    zoom: 4,
+    zoom: 1,  // Start zoomed out for faster initial load
     minZoom: 0,
     maxZoom: 6,
     pitch: 0,
@@ -1308,12 +1308,11 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
   }, [isPlaying, datasetConfig]);
 
   // Calculate target LOD from current zoom (limited by dataset's max level)
-  // Use +2 bias to prefer higher detail at all zoom levels (reduces blockiness)
   const targetLOD = useMemo(() => {
     const maxLevel = datasetConfig?.maxLevel || MAX_PYRAMID_LEVEL;
-    // More aggressive LOD selection: +2 bias for better quality
-    // zoom 0 → LOD 2, zoom 1 → LOD 3, zoom 2 → LOD 4
-    const level = Math.min(maxLevel, Math.max(0, Math.floor(viewState.zoom) + 2));
+    // Standard LOD selection: +1 bias balances quality vs load time
+    // zoom 0 → LOD 1 (256px), zoom 1 → LOD 2 (512px), zoom 2 → LOD 3, zoom 3+ → LOD 4
+    const level = Math.min(maxLevel, Math.max(0, Math.floor(viewState.zoom) + 1));
     return level;
   }, [viewState.zoom, datasetConfig]);
 
