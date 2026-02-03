@@ -1,25 +1,20 @@
 /**
- * OpenLayersUnifiedMap - Unified OpenLayers-based map for all projections
+ * LeafletUnifiedMap - Unified Leaflet-based map for all projections
  *
- * Uses OpenLayers with proj4 for native multi-projection support:
+ * Uses Leaflet + proj4leaflet to support:
  * - EPSG:3857 (Web Mercator) for soil moisture, fire, radiation
  * - EPSG:3413 (Polar Stereographic) for sea ice
  *
- * Single renderer architecture with proper CRS support
+ * Single renderer architecture - no deck.gl dependency
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import Map from 'ol/Map';
-import View from 'ol/View';
-import TileLayer from 'ol/layer/Tile';
-import ImageLayer from 'ol/layer/Image';
-import XYZ from 'ol/source/XYZ';
-import ImageStatic from 'ol/source/ImageStatic';
-import { register } from 'ol/proj/proj4';
-import { get as getProjection, transform } from 'ol/proj';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import 'proj4';
+import 'proj4leaflet';
 import proj4 from 'proj4';
 import * as zarr from 'zarrita';
-import 'ol/ol.css';
 import {
   Paper,
   Text,
@@ -33,6 +28,7 @@ import {
   Collapse,
   Box,
   Divider,
+  Anchor,
   CloseButton,
 } from '@mantine/core';
 import {
@@ -49,23 +45,63 @@ import {
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 // ============================================================================
-// PROJECTION DEFINITIONS - Register with proj4 and OpenLayers
+// PROJECTION DEFINITIONS
 // ============================================================================
 
+// EPSG:3857 - Web Mercator (standard web map projection)
+const EPSG3857_DEF = '+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs +type=crs';
+
 // EPSG:3413 - NSIDC Sea Ice Polar Stereographic North
-proj4.defs('EPSG:3413', '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs');
+const EPSG3413_DEF = '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs';
 
-// Register all proj4 definitions with OpenLayers
-register(proj4);
+// Register projections with proj4
+proj4.defs('EPSG:3857', EPSG3857_DEF);
+proj4.defs('EPSG:3413', EPSG3413_DEF);
 
-// Get projection objects
-const EPSG3857 = getProjection('EPSG:3857');
-const EPSG3413 = getProjection('EPSG:3413');
+// ============================================================================
+// CRS CONFIGURATIONS
+// ============================================================================
 
-// Set extent for polar projection
-if (EPSG3413) {
-  EPSG3413.setExtent([-4194304, -4194304, 4194304, 4194304]);
-}
+// Web Mercator CRS config
+const WEB_MERCATOR_CONFIG = {
+  // Standard Web Mercator bounds
+  bounds: {
+    xmin: -20037508.34,
+    ymin: -20037508.34,
+    xmax: 20037508.34,
+    ymax: 20037508.34,
+  },
+  // Standard Web Mercator resolutions (256px tiles)
+  resolutions: (() => {
+    const resolutions = [];
+    for (let i = 0; i <= 18; i++) {
+      resolutions.push(20037508.34 * 2 / 256 / Math.pow(2, i));
+    }
+    return resolutions;
+  })(),
+  origin: [-20037508.34, 20037508.34],
+};
+
+// Polar Stereographic CRS config (NASA GIBS compatible)
+const POLAR_CONFIG = {
+  bounds: {
+    xmin: -4194304,
+    ymin: -4194304,
+    xmax: 4194304,
+    ymax: 4194304,
+  },
+  resolutions: [8192, 4096, 2048, 1024, 512, 256],
+  origin: [-4194304, 4194304],
+  tileSize: 512,
+};
+
+// Sea ice data bounds (from processing - different from map bounds)
+const SEA_ICE_DATA_BOUNDS = {
+  xmin: -3850000,
+  ymin: -5350000,
+  xmax: 3750000,
+  ymax: 5850000,
+};
 
 // ============================================================================
 // DATASET CONFIGURATIONS
@@ -83,7 +119,7 @@ const DATASETS = {
     colormap: 'soil',
     vmin: 0.05,
     vmax: 0.5,
-    unit: 'm\u00B3/m\u00B3',
+    unit: 'm³/m³',
     description: 'ERA5 Volumetric Soil Water Layer 1',
   },
   radiation_budget: {
@@ -97,7 +133,7 @@ const DATASETS = {
     colormap: 'radiation',
     vmin: 0,
     vmax: 25000000,
-    unit: 'J/m\u00B2',
+    unit: 'J/m²',
     description: 'Surface Solar Radiation Downwards',
   },
   fire_burned_area: {
@@ -125,7 +161,7 @@ const DATASETS = {
     colormap: 'radiation',
     vmin: 0,
     vmax: 350,
-    unit: 'W/m\u00B2',
+    unit: 'W/m²',
     description: 'Surface Incoming Shortwave Radiation',
   },
   sea_ice: {
@@ -141,8 +177,6 @@ const DATASETS = {
     vmax: 100,
     unit: '%',
     description: 'Sea Ice Concentration',
-    // Polar-specific bounds
-    extent: [-3850000, -5350000, 3750000, 5850000],
   },
 };
 
@@ -171,6 +205,23 @@ const COLORMAPS = {
     [100, 160, 210], [140, 190, 230], [180, 215, 245], [210, 235, 255],
     [240, 250, 255], [255, 255, 255]
   ],
+};
+
+// ============================================================================
+// BASEMAP CONFIGURATIONS
+// ============================================================================
+
+const BASEMAPS = {
+  'EPSG:3857': {
+    url: 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+    attribution: '&copy; CARTO, &copy; OpenStreetMap contributors',
+    tileSize: 256,
+  },
+  'EPSG:3413': {
+    url: 'https://gibs.earthdata.nasa.gov/wmts/epsg3413/best/BlueMarble_NextGeneration/default/500m/{z}/{y}/{x}.jpeg',
+    attribution: '&copy; NASA GIBS',
+    tileSize: 512,
+  },
 };
 
 // ============================================================================
@@ -227,17 +278,16 @@ function findNearestIndex(arr, value) {
 // MAIN COMPONENT
 // ============================================================================
 
-export default function OpenLayersUnifiedMap({ onShowWelcome }) {
+export default function LeafletUnifiedMap({ onShowWelcome }) {
   // Map refs
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
-  const dataLayerRef = useRef(null);
-  const zoomTimeoutRef = useRef(null);
-  const lastLoadedLevelRef = useRef(null);
+  const imageOverlayRef = useRef(null);
+  const basemapLayerRef = useRef(null);
 
   // State
   const [selectedDataset, setSelectedDataset] = useState(null);
-  const [currentProjection, setCurrentProjection] = useState('EPSG:3857');
+  const [currentProjection, setCurrentProjection] = useState(null);
   const [loading, setLoading] = useState(false);
   const [timeIndex, setTimeIndex] = useState(0);
   const [selectedYear, setSelectedYear] = useState(2020);
@@ -268,88 +318,93 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
 
     // Clean up existing map
     if (mapInstanceRef.current) {
-      mapInstanceRef.current.setTarget(null);
+      mapInstanceRef.current.remove();
       mapInstanceRef.current = null;
-      dataLayerRef.current = null;
+      imageOverlayRef.current = null;
+      basemapLayerRef.current = null;
     }
 
-    let view, basemapSource;
+    let crs, center, zoom, minZoom, maxZoom;
 
     if (projection === 'EPSG:3413') {
-      // Polar Stereographic view
-      view = new View({
-        projection: EPSG3413,
-        center: [0, 0],
-        zoom: 2,
-        minZoom: 0,
-        maxZoom: 6,
-      });
-
-      // NASA GIBS polar basemap
-      basemapSource = new XYZ({
-        url: 'https://gibs.earthdata.nasa.gov/wmts/epsg3413/best/BlueMarble_NextGeneration/default/500m/{z}/{y}/{x}.jpeg',
-        projection: EPSG3413,
-        tileSize: 512,
-        maxZoom: 5,
-      });
+      // Polar Stereographic
+      crs = new L.Proj.CRS(
+        'EPSG:3413',
+        EPSG3413_DEF,
+        {
+          origin: POLAR_CONFIG.origin,
+          resolutions: POLAR_CONFIG.resolutions,
+          bounds: L.bounds(
+            [POLAR_CONFIG.bounds.xmin, POLAR_CONFIG.bounds.ymin],
+            [POLAR_CONFIG.bounds.xmax, POLAR_CONFIG.bounds.ymax]
+          ),
+        }
+      );
+      center = [80, 0];
+      zoom = 1;
+      minZoom = 0;
+      maxZoom = 5;
     } else {
-      // Web Mercator view (default)
-      view = new View({
-        projection: EPSG3857,
-        center: [0, 3000000],
-        zoom: 2,
-        minZoom: 1,
-        maxZoom: 12,
-      });
-
-      // CARTO dark basemap
-      basemapSource = new XYZ({
-        url: 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
-        attributions: '&copy; CARTO, &copy; OpenStreetMap contributors',
-      });
+      // Web Mercator (default)
+      crs = L.CRS.EPSG3857;
+      center = [30, 0];
+      zoom = 2;
+      minZoom = 1;
+      maxZoom = 10;
     }
 
-    const basemapLayer = new TileLayer({
-      source: basemapSource,
+    const map = L.map(mapContainerRef.current, {
+      crs: crs,
+      center: center,
+      zoom: zoom,
+      minZoom: minZoom,
+      maxZoom: maxZoom,
+      zoomControl: false,
+      attributionControl: true,
     });
 
-    const map = new Map({
-      target: mapContainerRef.current,
-      layers: [basemapLayer],
-      view: view,
-      controls: [],
-    });
+    // Add basemap
+    const basemapConfig = BASEMAPS[projection] || BASEMAPS['EPSG:3857'];
+    basemapLayerRef.current = L.tileLayer(basemapConfig.url, {
+      tileSize: basemapConfig.tileSize || 256,
+      attribution: basemapConfig.attribution,
+      noWrap: projection !== 'EPSG:3413',
+    }).addTo(map);
 
-    // Handle zoom changes with debounce to prevent flash during animations
-    view.on('change:resolution', () => {
-      const z = view.getZoom();
-      setCurrentZoom(z);
-
-      // Clear any pending zoom update
-      if (zoomTimeoutRef.current) {
-        clearTimeout(zoomTimeoutRef.current);
+    // Add graticule for polar view
+    if (projection === 'EPSG:3413') {
+      const graticuleStyle = { color: 'rgba(79, 209, 197, 0.25)', weight: 1 };
+      [60, 70, 80].forEach(lat => {
+        const points = [];
+        for (let lon = -180; lon <= 180; lon += 3) {
+          points.push([lat, lon]);
+        }
+        L.polyline(points, graticuleStyle).addTo(map);
+      });
+      for (let lon = -180; lon < 180; lon += 45) {
+        L.polyline([[50, lon], [90, lon]], graticuleStyle).addTo(map);
       }
+    }
 
-      // Debounce LOD level changes to prevent flash during zoom animations
-      zoomTimeoutRef.current = setTimeout(() => {
-        const newLevel = Math.max(0, Math.floor(z) + 1);
-        setCurrentLevel(newLevel);
-      }, 150);
+    // Event handlers
+    map.on('zoomend', () => {
+      const z = map.getZoom();
+      setCurrentZoom(z);
+      // Don't cap here - let loadData cap based on dataset's maxLevel
+      const newLevel = Math.max(0, Math.floor(z) + 1);
+      setCurrentLevel(newLevel);
     });
 
-    // Handle click for timeseries
-    map.on('click', (evt) => {
-      const coordinate = evt.coordinate;
-      // Transform to WGS84 for display and timeseries loading
-      const lonLat = transform(coordinate, projection, 'EPSG:4326');
+    map.on('click', (e) => {
+      const { lat, lng } = e.latlng;
       if (loadTimeseriesRef.current) {
-        loadTimeseriesRef.current(lonLat[0], lonLat[1], coordinate);
+        loadTimeseriesRef.current(lng, lat);
       }
     });
 
     mapInstanceRef.current = map;
     setCurrentProjection(projection);
-    console.log(`[OPENLAYERS] Map initialized with ${projection}`);
+    console.log(`[LEAFLET] Map initialized with ${projection}`);
   }, []);
 
   // ============================================================================
@@ -359,28 +414,21 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
   const loadData = useCallback(async () => {
     if (!selectedDataset || !mapInstanceRef.current || !datasetConfig) return;
 
-    const maxLevel = datasetConfig.maxLevel || 3;
-    const level = Math.min(currentLevel, maxLevel);
-    const loadKey = `${selectedDataset}-${level}-${selectedYear}-${timeIndex}`;
-
-    // Skip if we already have this exact data loaded
-    if (lastLoadedLevelRef.current === loadKey && dataLayerRef.current) {
-      return;
-    }
-
     setLoading(true);
     const startTime = performance.now();
 
     try {
+      const maxLevel = datasetConfig.maxLevel || 3;
+      const level = Math.min(currentLevel, maxLevel);
       const storePath = `${API_URL}${datasetConfig.path}/${level}`;
-      console.log(`[OPENLAYERS] Loading ${selectedDataset} level ${level}/${maxLevel}`);
+      console.log(`[LEAFLET] Loading ${selectedDataset} level ${level} (max: ${maxLevel})`);
 
       const store = new zarr.FetchStore(storePath);
       const root = zarr.root(store);
       const arr = await zarr.open(root.resolve(datasetConfig.variable), { kind: 'array' });
 
       const shape = arr.shape;
-      let slice, width, height;
+      let slice, height, width;
 
       if (datasetConfig.isMultiYear && shape.length === 4) {
         // Multi-year: [year, month, y, x]
@@ -390,10 +438,11 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
         const yearIndex = years.indexOf(selectedYear);
 
         if (yearIndex === -1) {
-          console.error(`Year ${selectedYear} not found`);
+          console.error(`Year ${selectedYear} not found. Available years:`, years.slice(0, 5), '...', years.slice(-5));
           setLoading(false);
           return;
         }
+        console.log(`[LEAFLET] Found year ${selectedYear} at index ${yearIndex}`);
 
         height = shape[2];
         width = shape[3];
@@ -409,8 +458,8 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
         return;
       }
 
+      console.log(`[LEAFLET] Data shape: ${width}x${height}`);
       setDataShape({ width, height });
-
       const rawData = slice.data;
       const rgba = applyColormap(
         rawData, width, height,
@@ -428,10 +477,16 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
       ctx.putImageData(imageData, 0, 0);
       const dataUrl = canvas.toDataURL();
 
-      // Get data extent
-      let extent;
-      if (isPolar && datasetConfig.extent) {
-        extent = datasetConfig.extent;
+      // Get data bounds
+      let latLngBounds;
+      if (isPolar) {
+        const sw = mapInstanceRef.current.options.crs.unproject(
+          L.point(SEA_ICE_DATA_BOUNDS.xmin, SEA_ICE_DATA_BOUNDS.ymin)
+        );
+        const ne = mapInstanceRef.current.options.crs.unproject(
+          L.point(SEA_ICE_DATA_BOUNDS.xmax, SEA_ICE_DATA_BOUNDS.ymax)
+        );
+        latLngBounds = L.latLngBounds(sw, ne);
       } else {
         // Web Mercator - get bounds from Zarr coordinates
         const xArr = await zarr.open(root.resolve('x'), { kind: 'array' });
@@ -441,53 +496,33 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
         const xCoords = Array.from(xResult.data);
         const yCoords = Array.from(yResult.data);
 
-        extent = [
-          xCoords[0],
-          yCoords[yCoords.length - 1],
-          xCoords[xCoords.length - 1],
-          yCoords[0]
-        ];
+        // Convert Web Mercator to lat/lng
+        const west = xCoords[0] * 180 / 20037508.34;
+        const east = xCoords[xCoords.length - 1] * 180 / 20037508.34;
+        const south = (Math.atan(Math.exp(yCoords[yCoords.length - 1] * Math.PI / 20037508.34)) * 360 / Math.PI) - 90;
+        const north = (Math.atan(Math.exp(yCoords[0] * Math.PI / 20037508.34)) * 360 / Math.PI) - 90;
+
+        latLngBounds = L.latLngBounds([south, west], [north, east]);
       }
 
-      // Store reference to old layer
-      const oldLayer = dataLayerRef.current;
-
-      // Create new data layer
-      const imageSource = new ImageStatic({
-        url: dataUrl,
-        projection: datasetConfig.projection,
-        imageExtent: extent,
-      });
-
-      const newLayer = new ImageLayer({
-        source: imageSource,
-        opacity: opacity,
-      });
-
-      // Add new layer first
-      mapInstanceRef.current.addLayer(newLayer);
-      dataLayerRef.current = newLayer;
-
-      // Remove old layer after brief delay (allows new layer to render first)
-      if (oldLayer) {
-        setTimeout(() => {
-          if (mapInstanceRef.current) {
-            try {
-              mapInstanceRef.current.removeLayer(oldLayer);
-            } catch (e) {
-              // Layer might already be removed
-            }
-          }
-        }, 100);
+      // Update or create overlay
+      if (imageOverlayRef.current) {
+        imageOverlayRef.current.setUrl(dataUrl);
+        imageOverlayRef.current.setBounds(latLngBounds);
+        imageOverlayRef.current.setOpacity(opacity);
+      } else {
+        imageOverlayRef.current = L.imageOverlay(dataUrl, latLngBounds, {
+          opacity: opacity,
+          interactive: false,
+        }).addTo(mapInstanceRef.current);
       }
 
       const duration = performance.now() - startTime;
       setLoadDuration(duration);
-      lastLoadedLevelRef.current = loadKey;
-      console.log(`[OPENLAYERS] Loaded in ${duration.toFixed(0)}ms`);
+      console.log(`[LEAFLET] Loaded in ${duration.toFixed(0)}ms`);
 
     } catch (error) {
-      console.error('[OPENLAYERS] Error loading data:', error);
+      console.error('[LEAFLET] Error loading data:', error);
     } finally {
       setLoading(false);
     }
@@ -497,7 +532,7 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
   // TIMESERIES LOADING
   // ============================================================================
 
-  const loadTimeseries = useCallback(async (lng, lat, nativeCoord) => {
+  const loadTimeseries = useCallback(async (lng, lat) => {
     if (!selectedDataset || !datasetConfig) return;
 
     setTimeseriesLoading(true);
@@ -518,10 +553,10 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
       const xCoords = Array.from(xResult.data);
       const yCoords = Array.from(yResult.data);
 
-      // Use native coordinates if polar, otherwise convert
+      // Convert click coordinates to data coordinates
       let dataX, dataY;
-      if (isPolar && nativeCoord) {
-        [dataX, dataY] = nativeCoord;
+      if (isPolar) {
+        [dataX, dataY] = proj4('EPSG:4326', 'EPSG:3413', [lng, lat]);
       } else {
         // Web Mercator
         dataX = lng * 20037508.34 / 180;
@@ -592,7 +627,7 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
   // Initialize map when projection changes
   useEffect(() => {
     const targetProjection = datasetConfig?.projection || 'EPSG:3857';
-    if (currentProjection !== targetProjection || !mapInstanceRef.current) {
+    if (currentProjection !== targetProjection) {
       initializeMap(targetProjection);
     }
   }, [datasetConfig, currentProjection, initializeMap]);
@@ -604,71 +639,68 @@ export default function OpenLayersUnifiedMap({ onShowWelcome }) {
     }
   }, [selectedDataset, currentLevel, timeIndex, selectedYear, loadData]);
 
-  // Update layer opacity when opacity changes
+  // Update opacity when it changes
   useEffect(() => {
-    if (dataLayerRef.current) {
-      dataLayerRef.current.setOpacity(opacity);
+    if (imageOverlayRef.current) {
+      imageOverlayRef.current.setOpacity(opacity);
     }
   }, [opacity]);
 
   // Handle dataset change
   const handleDatasetChange = (value) => {
-    // Clear existing layer
-    if (dataLayerRef.current && mapInstanceRef.current) {
-      mapInstanceRef.current.removeLayer(dataLayerRef.current);
-      dataLayerRef.current = null;
+    // Clear existing overlay
+    if (imageOverlayRef.current) {
+      imageOverlayRef.current.remove();
+      imageOverlayRef.current = null;
     }
-    lastLoadedLevelRef.current = null;
     setClickedPoint(null);
     setTimeseries(null);
     setTimeIndex(0);
 
     const config = DATASETS[value];
     if (config?.isMultiYear) {
-      setSelectedYear(config.yearRange?.end || 2020);
+      // Use a year that's likely to exist (prefer middle or recent year)
+      const startYear = config.yearRange?.start || 2000;
+      const endYear = config.yearRange?.end || 2023;
+      // Use year before the end to avoid edge cases
+      const safeYear = Math.max(startYear, endYear - 1);
+      setSelectedYear(safeYear);
+      console.log(`[DATASET] Setting year to ${safeYear} for ${value}`);
     }
 
     setSelectedDataset(value);
   };
 
+  // Zoom handlers
+  const handleZoomIn = () => mapInstanceRef.current?.zoomIn();
+  const handleZoomOut = () => mapInstanceRef.current?.zoomOut();
+
   // Copy tech info to clipboard
   const copyTechInfo = () => {
     const maxLevel = datasetConfig?.maxLevel || 3;
     const effectiveLevel = Math.min(currentLevel, maxLevel);
-    const info = `Tech Info (OpenLayers Unified)
-=====================================
+    const info = `Tech Info (Leaflet Unified)
 LOD: ${effectiveLevel} / ${maxLevel}
 Zoom: ${currentZoom.toFixed(1)}
-${dataShape ? `Data Size: ${dataShape.width} × ${dataShape.height} px` : ''}
+${dataShape ? `Data Size: ${dataShape.width} × ${dataShape.height} px (${(dataShape.width * dataShape.height / 1000).toFixed(0)}K pixels)` : ''}
+Time: ${MONTHS[timeIndex]}${datasetConfig?.isMultiYear ? ` ${selectedYear}` : ''}
 Load Time: ${loadDuration ? (loadDuration < 1000 ? `${loadDuration.toFixed(0)}ms` : `${(loadDuration / 1000).toFixed(2)}s`) : 'N/A'}
-Renderer: OpenLayers 10.x + proj4
-CRS: ${currentProjection}
-Architecture: Native multi-CRS support
-${selectedDataset ? `
-Dataset: ${selectedDataset}
-Variable: ${datasetConfig?.variable}
-Path: ${datasetConfig?.path}/${effectiveLevel}
-Year Range: ${datasetConfig?.yearRange?.start}-${datasetConfig?.yearRange?.end}
-Selected: ${selectedYear}, ${MONTHS[timeIndex]}` : ''}`;
+Opacity: ${Math.round(opacity * 100)}%
+
+Dataset: ${datasetConfig?.name || 'None'}
+Variable: ${datasetConfig?.variable || 'N/A'}
+Range: ${datasetConfig ? `${datasetConfig.vmin} - ${datasetConfig.vmax} ${datasetConfig.unit}` : 'N/A'}
+${datasetConfig?.isMultiYear ? `Years: ${datasetConfig.yearRange.start} - ${datasetConfig.yearRange.end}` : ''}
+
+Renderer: Leaflet + proj4leaflet
+CRS: ${currentProjection || 'None'}
+Format: Zarr v2 + LOD Pyramids
+Loader: zarrita.js`;
+
     navigator.clipboard.writeText(info).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
-  };
-
-  // Zoom handlers
-  const handleZoomIn = () => {
-    const view = mapInstanceRef.current?.getView();
-    if (view) {
-      view.animate({ zoom: view.getZoom() + 1, duration: 250 });
-    }
-  };
-
-  const handleZoomOut = () => {
-    const view = mapInstanceRef.current?.getView();
-    if (view) {
-      view.animate({ zoom: view.getZoom() - 1, duration: 250 });
-    }
   };
 
   // ============================================================================
@@ -709,10 +741,10 @@ Selected: ${selectedYear}, ${MONTHS[timeIndex]}` : ''}`;
               cursor: 'pointer',
             }}
           >
-            ECV Explorer (OpenLayers)
+            ECV Explorer (Leaflet)
           </Text>
           <Text size="xs" c="dimmed" mt={2}>
-            Unified OpenLayers Architecture
+            Unified Leaflet Architecture
           </Text>
         </div>
 
@@ -779,24 +811,6 @@ Selected: ${selectedYear}, ${MONTHS[timeIndex]}` : ''}`;
             </div>
           )}
 
-          {/* Opacity slider */}
-          {selectedDataset && (
-            <div>
-              <Text size="xs" c="white" fw={500} mb={4}>
-                Opacity: {Math.round(opacity * 100)}%
-              </Text>
-              <Slider
-                value={opacity}
-                onChange={setOpacity}
-                min={0}
-                max={1}
-                step={0.05}
-                size="xs"
-                color="cyan"
-              />
-            </div>
-          )}
-
           {/* Dataset info */}
           {datasetConfig && (
             <Text size="xs" c="dimmed">
@@ -811,7 +825,7 @@ Selected: ${selectedYear}, ${MONTHS[timeIndex]}` : ''}`;
                 {currentProjection}
               </Badge>
             )}
-            <Badge size="xs" color="orange" variant="light">OPENLAYERS</Badge>
+            <Badge size="xs" color="cyan" variant="light">LEAFLET</Badge>
             <Badge size="xs" color="teal" variant="light">ZARR</Badge>
           </Group>
         </Stack>
@@ -829,37 +843,37 @@ Selected: ${selectedYear}, ${MONTHS[timeIndex]}` : ''}`;
           background: 'rgba(26, 26, 46, 0.95)',
           backdropFilter: 'blur(20px)',
           zIndex: 1000,
-          minWidth: 220,
+          minWidth: 280,
+          maxWidth: 320,
           border: '1px solid rgba(79, 209, 197, 0.2)',
         }}
       >
         <Group gap="sm" justify="space-between">
-          <Group gap="xs" style={{ cursor: 'pointer' }} onClick={() => setTechInfoOpen(!techInfoOpen)}>
-            <Text size="xs" fw={500} c="white">Tech Info</Text>
-          </Group>
+          <Text size="xs" fw={500} c="white" style={{ cursor: 'pointer' }} onClick={() => setTechInfoOpen(!techInfoOpen)}>Tech Info</Text>
           <Group gap="xs">
-            <Badge color="cyan" size="sm">LOD {Math.min(currentLevel, datasetConfig?.maxLevel || 3)}/{datasetConfig?.maxLevel || 3}</Badge>
+            <Badge color="cyan" size="sm">LOD {Math.min(currentLevel, datasetConfig?.maxLevel || 4)}</Badge>
             <Badge color="teal" size="sm">Z {currentZoom.toFixed(1)}</Badge>
             {loadDuration !== null && (
               <Badge color={loadDuration < 2000 ? 'green' : 'red'} size="sm">
                 {loadDuration < 1000 ? `${loadDuration.toFixed(0)}ms` : `${(loadDuration / 1000).toFixed(2)}s`}
               </Badge>
             )}
+            {loading && <Badge color="yellow" size="sm">Loading...</Badge>}
             <ActionIcon
-              size="xs"
               variant="subtle"
-              color={copied ? 'green' : 'cyan'}
-              onClick={copyTechInfo}
+              color={copied ? 'green' : 'gray'}
+              size="xs"
+              onClick={(e) => { e.stopPropagation(); copyTechInfo(); }}
               title="Copy tech info"
             >
               {copied ? (
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="20 6 9 17 4 12" />
+                  <polyline points="20,6 9,17 4,12" />
                 </svg>
               ) : (
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  <rect x="9" y="9" width="13" height="13" rx="2" />
+                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
                 </svg>
               )}
             </ActionIcon>
@@ -869,42 +883,115 @@ Selected: ${selectedYear}, ${MONTHS[timeIndex]}` : ''}`;
         <Collapse in={techInfoOpen}>
           <Divider my="xs" color="rgba(79, 209, 197, 0.2)" />
           <Stack gap="xs">
+            {/* Layer Opacity Control */}
             <Box>
-              <Text size="xs" c="cyan" fw={500}>Renderer</Text>
-              <Text size="xs" c="dimmed">OpenLayers 10.x + proj4</Text>
+              <Group justify="space-between" mb={4}>
+                <Text size="xs" c="cyan" fw={500}>Layer Opacity</Text>
+                <Text size="xs" c="dimmed">{Math.round(opacity * 100)}%</Text>
+              </Group>
+              <Slider
+                value={opacity}
+                onChange={setOpacity}
+                min={0}
+                max={1}
+                step={0.05}
+                size="xs"
+                color="cyan"
+              />
             </Box>
+
+            <Divider color="rgba(79, 209, 197, 0.1)" />
+
+            {/* Current View Info */}
             <Box>
-              <Text size="xs" c="cyan" fw={500}>Current CRS</Text>
-              <Text size="xs" c="dimmed">{currentProjection || 'None'}</Text>
+              <Text size="xs" c="cyan" fw={500} mb={2}>Current View</Text>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">LOD Level:</Text>
+                <Text size="xs" c="white">{Math.min(currentLevel, datasetConfig?.maxLevel || 4)} / {datasetConfig?.maxLevel || 4}</Text>
+              </Group>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">Zoom:</Text>
+                <Text size="xs" c="white">{currentZoom.toFixed(1)}</Text>
+              </Group>
+              {dataShape && (
+                <Group gap={4}>
+                  <Text size="xs" c="dimmed">Data Size:</Text>
+                  <Text size="xs" c="white">{dataShape.width} × {dataShape.height} px</Text>
+                </Group>
+              )}
+              {dataShape && (
+                <Group gap={4}>
+                  <Text size="xs" c="dimmed">Pixels:</Text>
+                  <Text size="xs" c="white">{(dataShape.width * dataShape.height / 1000).toFixed(0)}K</Text>
+                </Group>
+              )}
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">Time:</Text>
+                <Text size="xs" c="white">{MONTHS[timeIndex]} {datasetConfig?.isMultiYear ? selectedYear : ''}</Text>
+              </Group>
             </Box>
-            <Box>
-              <Text size="xs" c="cyan" fw={500}>Architecture</Text>
-              <Text size="xs" c="dimmed">Native multi-CRS support</Text>
-            </Box>
-            {dataShape && (
+
+            <Divider color="rgba(79, 209, 197, 0.1)" />
+
+            {/* Dataset Info */}
+            {datasetConfig && (
               <Box>
-                <Text size="xs" c="cyan" fw={500}>Data Size</Text>
-                <Text size="xs" c="dimmed">{dataShape.width} × {dataShape.height} px</Text>
+                <Text size="xs" c="cyan" fw={500} mb={2}>Dataset</Text>
+                <Group gap={4}>
+                  <Text size="xs" c="dimmed">Name:</Text>
+                  <Text size="xs" c="white">{datasetConfig.name}</Text>
+                </Group>
+                <Group gap={4}>
+                  <Text size="xs" c="dimmed">Variable:</Text>
+                  <Text size="xs" c="white">{datasetConfig.variable}</Text>
+                </Group>
+                <Group gap={4}>
+                  <Text size="xs" c="dimmed">Range:</Text>
+                  <Text size="xs" c="white">{datasetConfig.vmin} - {datasetConfig.vmax} {datasetConfig.unit}</Text>
+                </Group>
+                {datasetConfig.isMultiYear && datasetConfig.yearRange && (
+                  <Group gap={4}>
+                    <Text size="xs" c="dimmed">Years:</Text>
+                    <Text size="xs" c="white">{datasetConfig.yearRange.start} - {datasetConfig.yearRange.end}</Text>
+                  </Group>
+                )}
               </Box>
             )}
-            {selectedDataset && (
-              <>
-                <Box>
-                  <Text size="xs" c="cyan" fw={500}>Dataset</Text>
-                  <Text size="xs" c="dimmed">{selectedDataset}</Text>
-                </Box>
-                <Box>
-                  <Text size="xs" c="cyan" fw={500}>Variable</Text>
-                  <Text size="xs" c="dimmed">{datasetConfig?.variable}</Text>
-                </Box>
-                <Box>
-                  <Text size="xs" c="cyan" fw={500}>Store Path</Text>
-                  <Text size="xs" c="dimmed" style={{ fontSize: '9px', wordBreak: 'break-all' }}>
-                    {datasetConfig?.path}/{Math.min(currentLevel, datasetConfig?.maxLevel || 3)}
-                  </Text>
-                </Box>
-              </>
-            )}
+
+            <Divider color="rgba(79, 209, 197, 0.1)" />
+
+            {/* Technical Stack */}
+            <Box>
+              <Text size="xs" c="cyan" fw={500} mb={2}>Technical Stack</Text>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">Renderer:</Text>
+                <Text size="xs" c="white">Leaflet + proj4leaflet</Text>
+              </Group>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">CRS:</Text>
+                <Text size="xs" c="white">{currentProjection || 'None'}</Text>
+              </Group>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">Data Format:</Text>
+                <Text size="xs" c="white">Zarr v2 + LOD Pyramids</Text>
+              </Group>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">Loader:</Text>
+                <Text size="xs" c="white">zarrita.js</Text>
+              </Group>
+            </Box>
+
+            <Divider color="rgba(79, 209, 197, 0.1)" />
+
+            {/* Architecture Note */}
+            <Box>
+              <Text size="xs" c="cyan" fw={500} mb={2}>Architecture</Text>
+              <Text size="xs" c="dimmed">
+                Single renderer supporting multiple CRS.
+                Leaflet reinitializes when switching between
+                Web Mercator (EPSG:3857) and Polar Stereographic (EPSG:3413).
+              </Text>
+            </Box>
           </Stack>
         </Collapse>
       </Paper>
@@ -1073,6 +1160,11 @@ Selected: ${selectedYear}, ${MONTHS[timeIndex]}` : ''}`;
         @keyframes shimmer {
           0% { background-position: -200% 0; }
           100% { background-position: 200% 0; }
+        }
+        .leaflet-control-attribution {
+          background: rgba(26, 26, 46, 0.8) !important;
+          color: rgba(255,255,255,0.5) !important;
+          font-size: 10px !important;
         }
       `}</style>
     </div>
