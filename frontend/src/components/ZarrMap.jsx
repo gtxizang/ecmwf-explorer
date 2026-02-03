@@ -56,6 +56,15 @@ import {
   getCacheStats,
 } from '../utils/dataOptimizations';
 
+// Viewport utilities for efficient partial loading
+import {
+  getViewportBoundsMercator,
+  viewportToDataIndices,
+  indicesToBounds,
+  shouldReloadViewport,
+  calculateCoverage,
+} from '../utils/viewportUtils';
+
 // Settings panel and feature flags
 import { SettingsPanel } from './SettingsPanel';
 import { getFeatureFlags } from '../config/featureFlags';
@@ -355,7 +364,7 @@ const DATASETS = {
     colorRange: { vmin: 0, vmax: 500000000 },  // m² - will display as km²
     description: 'Satellite-Derived — C3S Fire Burned Area — 2019-2023',
     defaultColormap: 'fire',
-    defaultSmoothing: 1,
+    defaultSmoothing: 2,  // Medium smoothing to reduce grid cell edges
     minThreshold: 0, // No threshold - source data is land-only
     fillValue: NaN, // NaN for no-data pixels (same as other Web Mercator datasets)
     introFact: 'Wildfires release ~8 billion tonnes of CO₂ annually',
@@ -771,6 +780,22 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
   const [loadStartTime, setLoadStartTime] = useState(null);
   const [loadEndTime, setLoadEndTime] = useState(null);
   const [loadDuration, setLoadDuration] = useState(null); // in milliseconds
+
+  // Viewport-based loading state
+  const [loadedBounds, setLoadedBounds] = useState(null); // { west, south, east, north } of currently loaded data
+  const [dataBoundsForLayer, setDataBoundsForLayer] = useState(null); // Bounds for BitmapLayer
+  // TEMPORARILY DISABLED: Viewport loading causes race condition errors
+  // Enable in Tech Info panel for testing, or set true when fully debugged
+  const [viewportLoadEnabled, setViewportLoadEnabled] = useState(false);
+  const viewportBoundsRef = useRef(null); // Current viewport bounds
+  const coordsCacheRef = useRef(null); // Cache coordinates for viewport calculations
+  const [viewportLoadInfo, setViewportLoadInfo] = useState({
+    mode: 'full', // 'viewport' or 'full'
+    coverage: 100, // percentage of full grid loaded
+    gridSize: null, // { width, height } of loaded data
+    fullGridSize: null, // { width, height } of full dataset
+    reason: null, // why full load (e.g., 'zoom too low', 'disabled')
+  });
 
   // Autoplay state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -1283,9 +1308,12 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
   }, [isPlaying, datasetConfig]);
 
   // Calculate target LOD from current zoom (limited by dataset's max level)
+  // Use +2 bias to prefer higher detail at all zoom levels (reduces blockiness)
   const targetLOD = useMemo(() => {
     const maxLevel = datasetConfig?.maxLevel || MAX_PYRAMID_LEVEL;
-    const level = Math.min(maxLevel, Math.max(0, Math.floor(viewState.zoom) + 1));
+    // More aggressive LOD selection: +2 bias for better quality
+    // zoom 0 → LOD 2, zoom 1 → LOD 3, zoom 2 → LOD 4
+    const level = Math.min(maxLevel, Math.max(0, Math.floor(viewState.zoom) + 2));
     return level;
   }, [viewState.zoom, datasetConfig]);
 
@@ -1484,44 +1512,164 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
         xCoords = coords.x;
         yCoords = coords.y;
 
+        // Cache coordinates for viewport calculations
+        coordsCacheRef.current = { x: xCoords, y: yCoords };
+
+        // Determine if we should use viewport-based loading
+        // Use viewport loading when zoomed in (zoom > 2) and enabled
+        // Also require valid coordinate arrays
+        const hasValidCoords = xCoords && xCoords.length > 0 && yCoords && yCoords.length > 0;
+        const useViewportLoad = viewportLoadEnabled && viewState.zoom > 2 && hasValidCoords;
+
+        // Calculate viewport bounds and data indices if viewport loading is enabled
+        let dataIndices = null;
+        let loadBounds = null;
+
+        if (useViewportLoad) {
+          try {
+            const vpBounds = getViewportBoundsMercator(viewState, window.innerWidth, window.innerHeight);
+            viewportBoundsRef.current = vpBounds;
+
+            // Convert to data indices
+            dataIndices = viewportToDataIndices(
+              { west: vpBounds.west, east: vpBounds.east, south: vpBounds.south, north: vpBounds.north },
+              xCoords,
+              yCoords,
+              64 // padding in pixels
+            );
+
+            // Validate indices before using them
+            if (dataIndices.width > 0 && dataIndices.height > 0 &&
+                dataIndices.xStart >= 0 && dataIndices.xEnd <= xCoords.length &&
+                dataIndices.yStart >= 0 && dataIndices.yEnd <= yCoords.length) {
+              // Calculate the bounds for the loaded data
+              loadBounds = indicesToBounds(dataIndices, xCoords, yCoords);
+              console.log(`[VIEWPORT] Loading ${dataIndices.width}x${dataIndices.height} pixels (${((dataIndices.width * dataIndices.height) / (coords.shape[2] * coords.shape[3]) * 100).toFixed(1)}% of full grid)`);
+            } else {
+              console.warn('[VIEWPORT] Invalid indices, falling back to full load');
+              dataIndices = null;
+              loadBounds = null;
+            }
+          } catch (vpError) {
+            console.warn('[VIEWPORT] Error calculating viewport bounds, falling back to full load:', vpError.message);
+            dataIndices = null;
+            loadBounds = null;
+          }
+        }
+
         if (isMultiYear) {
-          height = coords.shape[2];
-          width = coords.shape[3];
+          height = useViewportLoad && dataIndices ? dataIndices.height : coords.shape[2];
+          width = useViewportLoad && dataIndices ? dataIndices.width : coords.shape[3];
 
           const yearIndex = coords.years.indexOf(selectedYear);
           if (yearIndex === -1) {
             throw new Error(`Year ${selectedYear} not found in dataset. Available: ${coords.years[0]}-${coords.years[coords.years.length-1]}`);
           }
 
-          // Fetch data slice with caching
-          rawData = await fetchDataDeduplicated(dataCacheKey, async () => {
-            console.log(`[CACHE] Fetching data slice ${selectedDataset} L${targetLOD} ${selectedYear}/${timeIndex}`);
-            const store = new zarr.FetchStore(storeUrl);
-            const root = zarr.root(store);
-            const arr = await zarr.open(root.resolve(datasetConfig.variable), { kind: 'array' });
-            const result = await zarr.get(arr, [yearIndex, timeIndex, null, null]);
-            return result.data;
-          });
-        } else {
-          height = coords.shape[1];
-          width = coords.shape[2];
+          // Create cache key that includes viewport bounds when using viewport loading
+          const vpCacheKey = useViewportLoad && dataIndices
+            ? `${dataCacheKey}-vp-${dataIndices.xStart}-${dataIndices.xEnd}-${dataIndices.yStart}-${dataIndices.yEnd}`
+            : dataCacheKey;
 
           // Fetch data slice with caching
-          rawData = await fetchDataDeduplicated(dataCacheKey, async () => {
-            console.log(`[CACHE] Fetching data slice ${selectedDataset} L${targetLOD} ${timeIndex}`);
+          rawData = await fetchDataDeduplicated(vpCacheKey, async () => {
+            const loadType = useViewportLoad ? 'viewport' : 'full';
+            console.log(`[CACHE] Fetching ${loadType} data ${selectedDataset} L${targetLOD} ${selectedYear}/${timeIndex}`);
             const store = new zarr.FetchStore(storeUrl);
             const root = zarr.root(store);
             const arr = await zarr.open(root.resolve(datasetConfig.variable), { kind: 'array' });
-            const result = await zarr.get(arr, [timeIndex, null, null]);
-            return result.data;
+
+            if (useViewportLoad && dataIndices &&
+                dataIndices.xEnd > dataIndices.xStart &&
+                dataIndices.yEnd > dataIndices.yStart) {
+              // Viewport-based loading - only fetch visible data
+              const result = await zarr.get(arr, [
+                yearIndex,
+                timeIndex,
+                [dataIndices.yStart, dataIndices.yEnd],
+                [dataIndices.xStart, dataIndices.xEnd]
+              ]);
+              return result.data;
+            } else {
+              // Full data loading (also fallback for invalid viewport indices)
+              const result = await zarr.get(arr, [yearIndex, timeIndex, null, null]);
+              return result.data;
+            }
+          });
+        } else {
+          height = useViewportLoad && dataIndices ? dataIndices.height : coords.shape[1];
+          width = useViewportLoad && dataIndices ? dataIndices.width : coords.shape[2];
+
+          // Create cache key that includes viewport bounds when using viewport loading
+          const vpCacheKey = useViewportLoad && dataIndices
+            ? `${dataCacheKey}-vp-${dataIndices.xStart}-${dataIndices.xEnd}-${dataIndices.yStart}-${dataIndices.yEnd}`
+            : dataCacheKey;
+
+          // Fetch data slice with caching
+          rawData = await fetchDataDeduplicated(vpCacheKey, async () => {
+            const loadType = useViewportLoad ? 'viewport' : 'full';
+            console.log(`[CACHE] Fetching ${loadType} data ${selectedDataset} L${targetLOD} ${timeIndex}`);
+            const store = new zarr.FetchStore(storeUrl);
+            const root = zarr.root(store);
+            const arr = await zarr.open(root.resolve(datasetConfig.variable), { kind: 'array' });
+
+            if (useViewportLoad && dataIndices &&
+                dataIndices.xEnd > dataIndices.xStart &&
+                dataIndices.yEnd > dataIndices.yStart) {
+              // Viewport-based loading - only fetch visible data
+              const result = await zarr.get(arr, [
+                timeIndex,
+                [dataIndices.yStart, dataIndices.yEnd],
+                [dataIndices.xStart, dataIndices.xEnd]
+              ]);
+              return result.data;
+            } else {
+              // Full data loading (also fallback for invalid viewport indices)
+              const result = await zarr.get(arr, [timeIndex, null, null]);
+              return result.data;
+            }
           });
         }
 
-        // Calculate bounds from coordinates
-        const xMin = Math.min(...xCoords);
-        const xMax = Math.max(...xCoords);
-        const yMin = Math.min(...yCoords);
-        const yMax = Math.max(...yCoords);
+        // Set the bounds for the BitmapLayer and update viewport load info
+        const fullWidth = isMultiYear ? coords.shape[3] : coords.shape[2];
+        const fullHeight = isMultiYear ? coords.shape[2] : coords.shape[1];
+
+        if (useViewportLoad && loadBounds) {
+          setDataBoundsForLayer(loadBounds);
+          setLoadedBounds({
+            west: loadBounds[0],
+            south: loadBounds[1],
+            east: loadBounds[2],
+            north: loadBounds[3],
+          });
+          setViewportLoadInfo({
+            mode: 'viewport',
+            coverage: ((width * height) / (fullWidth * fullHeight) * 100).toFixed(1),
+            gridSize: { width, height },
+            fullGridSize: { width: fullWidth, height: fullHeight },
+            reason: null,
+          });
+        } else {
+          // Full data - use original dataset bounds (don't override with calculated bounds)
+          // This preserves the correct geographic positioning from datasetConfig.bounds
+          setDataBoundsForLayer(null); // Will fall back to datasetConfig?.bounds in the layer
+          setLoadedBounds(null);
+          setViewportLoadInfo({
+            mode: 'full',
+            coverage: 100,
+            gridSize: { width: fullWidth, height: fullHeight },
+            fullGridSize: { width: fullWidth, height: fullHeight },
+            reason: !viewportLoadEnabled ? 'disabled' : viewState.zoom <= 2 ? 'zoom too low' : !hasValidCoords ? 'no coords' : null,
+          });
+        }
+
+        // Calculate bounds from coordinates (for stats and other uses)
+        // Guard against empty arrays
+        const xMin = xCoords && xCoords.length > 0 ? Math.min(...xCoords) : -20037508.34;
+        const xMax = xCoords && xCoords.length > 0 ? Math.max(...xCoords) : 20037508.34;
+        const yMin = yCoords && yCoords.length > 0 ? Math.min(...yCoords) : -20037508.34;
+        const yMax = yCoords && yCoords.length > 0 ? Math.max(...yCoords) : 20037508.34;
 
         // console.log(`[ZARR] Bounds: x=[${xMin}, ${xMax}], y=[${yMin}, ${yMax}]`);
 
@@ -1618,12 +1766,42 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
     };
 
     loadData();
-  }, [targetLOD, timeIndex, selectedYear, colormapName, selectedDataset, datasetConfig, smoothingLevel, showWelcome]);
+    // Note: viewState is included for viewport-based loading, but the loadData function
+    // has internal checks to prevent unnecessary reloads when zoomed out
+  }, [targetLOD, timeIndex, selectedYear, colormapName, selectedDataset, datasetConfig, smoothingLevel, showWelcome, viewState.zoom, viewState.latitude, viewState.longitude, viewportLoadEnabled]);
 
-  // Debounced view state change
+  // Debounced view state change with viewport reload trigger
+  const viewportReloadTimeoutRef = useRef(null);
+  const lastViewportReloadRef = useRef(null);
+
   const handleViewStateChange = useCallback(({ viewState: vs }) => {
     setViewState(vs);
-  }, []);
+
+    // If viewport loading is enabled and we're zoomed in, check if we need to reload
+    if (viewportLoadEnabled && vs.zoom > 2 && coordsCacheRef.current && !loading) {
+      // Debounce viewport-based reloading
+      if (viewportReloadTimeoutRef.current) {
+        clearTimeout(viewportReloadTimeoutRef.current);
+      }
+
+      viewportReloadTimeoutRef.current = setTimeout(() => {
+        // Check if viewport has changed enough to warrant reload
+        const newVpBounds = getViewportBoundsMercator(vs, window.innerWidth, window.innerHeight);
+
+        if (shouldReloadViewport(lastViewportReloadRef.current, newVpBounds, 0.3)) {
+          // Check coverage - only reload if we're not fully covered by loaded data
+          const coverage = calculateCoverage(newVpBounds, loadedBounds);
+          if (coverage < 0.7) {
+            console.log(`[VIEWPORT] Coverage ${(coverage * 100).toFixed(0)}% - triggering reload`);
+            lastViewportReloadRef.current = newVpBounds;
+            // Force reload by clearing image cache for this configuration
+            // This will cause the useEffect to re-run with new viewport
+            setDataBoundsForLayer(null);
+          }
+        }
+      }, 300); // 300ms debounce
+    }
+  }, [viewportLoadEnabled, loading, loadedBounds]);
 
   // Load timeseries for clicked point
   const loadTimeseries = useCallback(async (lng, lat) => {
@@ -1772,8 +1950,8 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
       },
     }));
 
-    // Use dataset-specific bounds if available, otherwise default
-    const dataBounds = datasetConfig?.bounds || WORLD_BOUNDS;
+    // Use viewport-based bounds if available, otherwise dataset bounds, otherwise default
+    const dataBounds = dataBoundsForLayer || datasetConfig?.bounds || WORLD_BOUNDS;
 
     // NEVER BLANK SCREENS: Always show previous data while loading
     // Previous layer stays at 0.7 opacity during loading, giving visual continuity
@@ -1833,7 +2011,7 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
     layerList.push(...regionComputation.layers);
 
     return layerList;
-  }, [imageUrl, prevImageUrl, clickedPoint, dataOpacity, userOpacity, loading, isPlaying, datasetConfig, regionComputation.layers]);
+  }, [imageUrl, prevImageUrl, clickedPoint, dataOpacity, userOpacity, loading, isPlaying, datasetConfig, regionComputation.layers, dataBoundsForLayer]);
 
   return (
     <div style={{
@@ -2278,6 +2456,16 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
             <Badge color="blue" size="sm" variant="light">
               Zoom {viewState.zoom.toFixed(1)}
             </Badge>
+            <Badge
+              color={viewportLoadInfo.mode === 'viewport' ? 'green' : 'gray'}
+              size="sm"
+              variant="light"
+              title={viewportLoadInfo.mode === 'viewport'
+                ? `Viewport load: ${viewportLoadInfo.coverage}% of grid`
+                : viewportLoadInfo.reason || 'Full grid load'}
+            >
+              {viewportLoadInfo.mode === 'viewport' ? `VP ${viewportLoadInfo.coverage}%` : 'FULL'}
+            </Badge>
             {/* Load timer - always visible */}
             {loadDuration !== null && (
               <Badge
@@ -2347,6 +2535,63 @@ export function ZarrMap({ onPolarView, onGlobeView }) {
                 </>
               )}
             </Box>
+
+            <Divider color="dark.5" />
+
+            {/* Viewport Loading Section */}
+            <Box>
+              <Text size="xs" fw={600} c="cyan" mb={4}>Viewport Loading</Text>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">Mode:</Text>
+                <Badge
+                  size="xs"
+                  color={viewportLoadInfo.mode === 'viewport' ? 'green' : 'blue'}
+                  variant="filled"
+                >
+                  {viewportLoadInfo.mode === 'viewport' ? 'Viewport' : 'Full Grid'}
+                </Badge>
+                {viewportLoadInfo.reason && (
+                  <Text size="xs" c="dimmed">({viewportLoadInfo.reason})</Text>
+                )}
+              </Group>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">Grid Size:</Text>
+                <Text size="xs" c="white">
+                  {viewportLoadInfo.gridSize ? `${viewportLoadInfo.gridSize.width}×${viewportLoadInfo.gridSize.height}` : '—'}
+                </Text>
+                {viewportLoadInfo.mode === 'viewport' && viewportLoadInfo.fullGridSize && (
+                  <Text size="xs" c="dimmed">
+                    (of {viewportLoadInfo.fullGridSize.width}×{viewportLoadInfo.fullGridSize.height})
+                  </Text>
+                )}
+              </Group>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">Data Loaded:</Text>
+                <Text size="xs" c={viewportLoadInfo.coverage < 50 ? 'green' : 'white'}>
+                  {viewportLoadInfo.coverage}%
+                </Text>
+                {viewportLoadInfo.mode === 'viewport' && parseFloat(viewportLoadInfo.coverage) < 100 && (
+                  <Text size="xs" c="green">
+                    ({(100 - parseFloat(viewportLoadInfo.coverage)).toFixed(0)}% saved)
+                  </Text>
+                )}
+              </Group>
+              <Group gap={4} mt={4}>
+                <Text size="xs" c="dimmed">VP Load:</Text>
+                <Badge
+                  size="xs"
+                  color={viewportLoadEnabled ? 'green' : 'red'}
+                  variant="light"
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => setViewportLoadEnabled(!viewportLoadEnabled)}
+                >
+                  {viewportLoadEnabled ? 'ON' : 'OFF'}
+                </Badge>
+                <Text size="xs" c="dimmed">(click to toggle)</Text>
+              </Group>
+            </Box>
+
+            <Divider color="dark.5" />
 
             {/* Smoothing Control */}
             <Box>
